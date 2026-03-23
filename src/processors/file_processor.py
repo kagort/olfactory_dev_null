@@ -76,7 +76,7 @@ class FileProcessor:
         return left_context, right_context, concept_phrase
     
     def _analyze_sentence(self, sentence: str, text_id: int, position: int, 
-                          language: str) -> Optional[Dict]:
+                        language: str) -> Optional[Dict]:
         """
         Анализирует предложение и возвращает данные для сохранения,
         если в нем есть запахи
@@ -107,7 +107,6 @@ class FileProcessor:
                     'word': token.text,
                     'lemma': token.lemma_,
                     'pos': token.pos_,
-                    'position': token.i + 1,
                     'left_context': left,
                     'right_context': right,
                     'concept': concept
@@ -132,6 +131,7 @@ class FileProcessor:
     def process_file(self, file_path: str, 
                     title: Optional[str] = None,
                     author: Optional[str] = None,
+                    translator: Optional[str] = None,
                     year: Optional[int] = None,
                     language: Optional[str] = None,
                     is_original: bool = True,
@@ -176,6 +176,7 @@ class FileProcessor:
                 language=language,
                 title=title,
                 author=author if author else "Неизвестен",
+                translator=translator,
                 year=year,
                 content=text,
                 original_lang=original_lang,

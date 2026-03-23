@@ -6,12 +6,18 @@ class Database:
     def __init__(self, path):
         self.path = path
         self.conn = None
+        
+        
+        
     
     def connect(self):
         """Открывает соединение"""
         if not self.conn:
             self.conn = sqlite3.connect(self.path)
             self.conn.row_factory = sqlite3.Row
+            
+            # включаем самоудаление в зависимости от внешнего ключа
+            self.conn.execute("PRAGMA foreign_keys = ON")
         return self.conn
     
     def close(self):

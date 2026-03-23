@@ -1,2 +1,20 @@
-**/book
-/__pycache__/
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Data exports
+data/csv/
+*.csv
+*.xlsx
+
+# Database
+*.db
+
+# Books
+book/
+books/
+
+# Virtual environment
+venv/
+.venv/

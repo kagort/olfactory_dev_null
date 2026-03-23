@@ -1,16 +1,51 @@
 import json
 from typing import List, Dict, Optional, Any, Union
 
-
-class TableManager:
-    """Создание и управление таблицами"""
+class BaseManager:
     def __init__(self, db):
         self.db = db
         self.languages = ['ru', 'en', 'de']
+        self.table_base_name = None
     
-    def create_all(self):
-        """Создает все нужные таблицы"""
+    def _get_language_table(self, language: str) -> str:
+        # base_name берется из self.table_base_name
+        if self.__class__.table_base_name is None:
+            raise NotImplementedError("table_base_name не установлен")
+        if language not in self.languages:
+            raise ValueError(f"Язык {language} не поддерживается")
+        return f"{self.__class__.table_base_name}_{language}"
+
+    def _validate_text_exists(self, language, **criteria):
+        # тут в качестве валидатора можно использовать любое поле из таблицы text, начиная с id, заканчивая временем создания
+        if not criteria:
+            return False
+        conditions = [f"{k} = ?" for k in criteria.keys()]
+        params = list(criteria.values())
+        query = f"SELECT id FROM texts_{language} WHERE {' AND '.join(conditions)}"
+        return bool(self.db.execute(query, params))
+
+    def find(self, language: str, **filters) -> List[Dict]:
+        """Универсальный поиск"""
+        table = self._get_language_table(language)
         
+        if not filters:
+            results = self.db.execute(f"SELECT * FROM {table}")
+        else:
+            conditions = [f"{k} = ?" for k in filters.keys()]
+            params = list(filters.values())
+            where = " AND ".join(conditions)
+            results = self.db.execute(f"SELECT * FROM {table} WHERE {where}", params)
+        
+        return results
+    
+    def find_one(self, language: str, **filters) -> Optional[Dict]:
+        """Найти одну запись"""
+        results = self.find(language, **filters)
+        return results[0] if results else None
+
+class TableManager(BaseManager):
+    def create_all(self):
+        """Создает все нужные таблицы"""  
         # 1. Таблицы текстов для каждого языка (оставляем как есть)
         for lang in self.languages:
             self.db.execute(f'''
@@ -18,6 +53,7 @@ class TableManager:
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     title TEXT NOT NULL,
                     author TEXT NOT NULL,
+                    translator TEXT, 
                     year INTEGER,
                     content TEXT NOT NULL,
                     text_type TEXT NOT NULL CHECK(text_type IN ('original', 'translation')),
@@ -50,12 +86,12 @@ class TableManager:
         # 3. НОВЫЕ таблицы только для ольфакторных предложений (вместо sentences_*)
         for lang in self.languages:
             self.db.execute(f'''
-                CREATE TABLE IF NOT EXISTS olfactory_{lang} (
+                CREATE TABLE IF NOT EXISTS sent_{lang} (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     text_id INTEGER NOT NULL,
-                    position INTEGER NOT NULL,
                     sentence TEXT NOT NULL,
-                    smell_words TEXT,  -- JSON со словами-запахами
+                    position INTEGER NOT NULL,
+                    smell_word TEXT,
                     left_context TEXT,
                     right_context TEXT,
                     
@@ -72,12 +108,12 @@ class TableManager:
             ''')
             
             self.db.execute(f'''
-                CREATE INDEX IF NOT EXISTS idx_olfactory_{lang}_text 
-                ON olfactory_{lang}(text_id)
+                CREATE INDEX IF NOT EXISTS idx_sent_{lang}_text 
+                ON sent_{lang}(text_id)
             ''')
             self.db.execute(f'''
-                CREATE INDEX IF NOT EXISTS idx_olfactory_{lang}_position 
-                ON olfactory_{lang}(position)
+                CREATE INDEX IF NOT EXISTS idx_sent_{lang}_position 
+                ON sent_{lang}(position)
             ''')
         
         # 4. Таблица выравнивания ТОЛЬКО для ольфакторных предложений
@@ -88,84 +124,53 @@ class TableManager:
                 en_id INTEGER NOT NULL,
                 verified BOOLEAN DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (ru_id) REFERENCES olfactory_ru(id) ON DELETE CASCADE,
-                FOREIGN KEY (en_id) REFERENCES olfactory_en(id) ON DELETE CASCADE,
+                FOREIGN KEY (ru_id) REFERENCES sent_ru(id) ON DELETE CASCADE,
+                FOREIGN KEY (en_id) REFERENCES sent_en(id) ON DELETE CASCADE,
                 UNIQUE(ru_id, en_id)
             )
         ''')
         
+        for lang in self.languages:
+            self.db.execute(f'''
+                CREATE TABLE IF NOT EXISTS olfactory_words_{lang}(
+                    id INTEGER PRIMARY KEY,
+                    olf_id INTEGER NOT NULL,           -- ссылка на предложение
+                    word TEXT NOT NULL,                 -- слово
+                    lemma TEXT,                         -- лемма
+                    pos TEXT,                           -- часть речи
+                    children TEXT,
+                    concept TEXT,                       -- словосочетание
+                    FOREIGN KEY (olf_id) REFERENCES sent_{lang}(id) ON DELETE CASCADE
+                );
+            ''')
+        
         print("📊 Все таблицы успешно созданы")
 
-class TextManager:
-    """Работа с текстами"""
-    def __init__(self, db):
-        self.db = db
-        self.languages = ['ru', 'en', 'de']
+class TextManager(BaseManager):
+    table_base_name = 'texts'
     
-    def _get_table(self, language):
-        """Возвращает имя таблицы для языка"""
-        if language not in self.languages:
-            raise ValueError(f"Язык {language} не поддерживается")
-        return f"texts_{language}"
+    def _add_text(self, language, title, author, translator, year, content, text_type):
+        """Внутренний метод для добавления текста (без логики связей)"""
+        table = self._get_language_table(language)
+        return self.db.execute(
+            f"INSERT INTO {table} (title, author, translator, year, content, text_type) VALUES (?, ?, ?, ?, ?, ?)",
+            (title, author, translator, year, content, text_type)
+        )
     
     def add_original(self, language, title, author, year, content):
-        """Добавить оригинальный текст"""
-        table = self._get_table(language)
-        return self.db.execute(
-            f"INSERT INTO {table} (title, author, year, content, text_type) VALUES (?, ?, ?, ?, 'original')",
-            (title, author, year, content)
-        )
-    
-    def add_translation(self, language, title, author, year, content, original_lang, original_id):
-        """Добавить перевод"""
-        table = self._get_table(language)
+        if self._validate_text_exists(language, title=title):
+            raise ValueError(f'Текст с названием {title} уже существует')
         
-        # Добавляем перевод
-        trans_id = self.db.execute(
-            f"INSERT INTO {table} (title, author, year, content, text_type) VALUES (?, ?, ?, ?, 'translation')",
-            (title, author, year, content)
-        )
-        
-        # Связываем с оригиналом
+        return self._add_text(language, title, author, '-', year, content, 'original')
+
+    def add_translation(self, language, title, author, translator, year, content, original_lang, original_id):
+        trans_id = self._add_text(language, title, author, translator, year, content, 'translation')
         self.db.execute(
             "INSERT INTO text_relations (original_lang, original_id, translation_lang, translation_id) VALUES (?, ?, ?, ?)",
             (original_lang, original_id, language, trans_id)
         )
-        
         return trans_id
-    
-    def get_by_id(self, language, text_id):
-        """Получить текст по ID"""
-        table = self._get_table(language)
-        result = self.db.execute(f"SELECT * FROM {table} WHERE id = ?", (text_id,))
-        return result[0] if result else None
-    
-    def get_by_language(self, language, text_type=None):
-        """Получить все тексты на языке"""
-        table = self._get_table(language)
-        if text_type:
-            return self.db.execute(
-                f"SELECT * FROM {table} WHERE text_type = ? ORDER BY author, year",
-                (text_type,)
-            )
-        return self.db.execute(f"SELECT * FROM {table} ORDER BY author, year")
-    
-    def get_by_author(self, author, language):
-        """Поиск текстов по автору"""
-        table = self._get_table(language)
-        return self.db.execute(
-            f"SELECT * FROM {table} WHERE author LIKE ? ORDER BY year",
-            (f"%{author}%",)
-        )
-    
-    def get_by_year_range(self, start_year, end_year, language):
-        """Получить тексты за период"""
-        table = self._get_table(language)
-        return self.db.execute(
-            f"SELECT * FROM {table} WHERE year BETWEEN ? AND ? ORDER BY year",
-            (start_year, end_year)
-        )
-    
+
     def get_translations(self, original_lang, original_id):
         """Получить все переводы текста"""
         relations = self.db.execute(
@@ -175,7 +180,7 @@ class TextManager:
         
         translations = []
         for rel in relations:
-            table = self._get_table(rel['translation_lang'])
+            table = self._get_language_table(rel['translation_lang'])
             text = self.db.execute(
                 f"SELECT * FROM {table} WHERE id = ?",
                 (rel['translation_id'],)
@@ -195,7 +200,7 @@ class TextManager:
         
         if relations:
             rel = relations[0]
-            table = self._get_table(rel['original_lang'])
+            table = self._get_language_table(rel['original_lang'])
             text = self.db.execute(
                 f"SELECT * FROM {table} WHERE id = ?",
                 (rel['original_id'],)
@@ -204,10 +209,20 @@ class TextManager:
                 text[0]['language'] = rel['original_lang']
                 return text[0]
         return None
-    
+
+    def get_by_language(self, language, text_type=None):
+        """Получить все тексты на языке"""
+        table = self._get_language_table(language)
+        if text_type:
+            return self.db.execute(
+                f"SELECT * FROM {table} WHERE text_type = ? ORDER BY author, year",
+                (text_type,)
+            )
+        return self.db.execute(f"SELECT * FROM {table} ORDER BY author, year")
+        
     def delete(self, language, text_id):
         """Удалить текст"""
-        table = self._get_table(language)
+        table = self._get_language_table(language)
         
         # Удаляем связи
         self.db.execute(
@@ -218,205 +233,58 @@ class TextManager:
         # Удаляем текст
         return self.db.execute(f"DELETE FROM {table} WHERE id = ?", (text_id,))
 
-class DummyDict:
-    """Заглушка для словаря, если он не нужен"""
-    def __init__(self):
-        pass
+class OlfactoryManager(BaseManager):
+    table_base_name = 'sent'
     
-    def check(self, word, language):
-        return False
-    
-    def get_all(self, language=None):
-        return []
-    
-    def add(self, word, language):
-        return True
-    
-
-class OlfactoryManager:
-    """Работа с ольфакторными предложениями"""
-    def __init__(self, db):
-        self.db = db
-        self.languages = ['ru', 'en', 'de']
-        
-
-    def _get_table(self, language: str) -> str:
-        """Получить имя таблицы для языка"""
-        if language not in self.languages:
-            raise ValueError(f"Язык {language} не поддерживается")
-        return f"olfactory_{language}"
-    
-    def _parse_smell_words(self, data: Optional[Dict]) -> Optional[Dict]:
-        """Разобрать JSON с запахами"""
-        if data and data.get('smell_words'):
-            try:
-                data['smell_words'] = json.loads(data['smell_words'])
-            except (json.JSONDecodeError, TypeError):
-                pass
-        return data
-    
-    def _validate_text_exists(self, language: str, text_id: int) -> bool:
-        """Проверить, существует ли текст"""
-        result = self.db.execute(
-            f"SELECT id FROM texts_{language} WHERE id = ?",
-            (text_id,)
-        )
-        return bool(result)
-    
-    def add(self, language: str, text_id: int, position: int, sentence: str,
+    def add(self, language: str, text_id: int, position: int, sentence: str,  # ← добавить position
             smell_words: list = None, left_context: str = None, 
             right_context: str = None, verified: bool = False,
             type_val: str = None, connotation: str = None, 
             tonal: str = None, gramm_structure: str = None,
             comments: str = None) -> int:
-        """
-        Добавить ОДНО ольфакторное предложение
         
-        Args:
-            language: язык
-            text_id: ID текста
-            position: позиция в тексте
-            sentence: текст предложения
-            smell_words: список слов-запахов
-            left_context: левый контекст
-            right_context: правый контекст
-            verified: проверено ли
-            type_val: тип ('direct' или 'metaphor')
-            connotation: коннотация
-            tonal: тональность
-            gramm_structure: грамматическая структура
-            comments: комментарии
-            
-        Returns:
-            int: ID добавленного предложения
-        """
-        # Проверяем язык
-        if language not in self.languages:
-            raise ValueError(f"Язык {language} не поддерживается")
+        table = self._get_language_table(language)
         
-        # Проверяем существование текста
-        if not self._validate_text_exists(language, text_id):
-            raise ValueError(f"Текст с id {text_id} не существует в языке {language}")
+        if not self._validate_text_exists(language, id=text_id):
+            raise ValueError(f"Текст с id {text_id} не существует")
         
-        # Подготавливаем smell_words в JSON
-        if smell_words is None:
-            smell_words_json = None
-        elif isinstance(smell_words, (list, dict)):
-            smell_words_json = json.dumps(smell_words, ensure_ascii=False)
-        else:
-            smell_words_json = str(smell_words)
-        
-        table = f"olfactory_{language}"
-        
-        # Вставляем запись
+        # 1. Добавляем предложение (с position!)
         cursor = self.db.conn.execute(f"""
             INSERT INTO {table} 
-            (text_id, position, sentence, smell_words, left_context, right_context,
-             type, connotation, tonal, gramm_structure, comments, verified)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            RETURNING id
-        """, (text_id, position, sentence, smell_words_json, 
-              left_context, right_context, type_val, connotation,
-              tonal, gramm_structure, comments, 1 if verified else 0))
+            (text_id, position, sentence, left_context, right_context,
+            type, connotation, tonal, gramm_structure, comments, verified)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (text_id, position, sentence, left_context, right_context,
+            type_val, connotation, tonal, gramm_structure, comments, 
+            1 if verified else 0))
         
-        result = cursor.fetchone()
+        olf_id = cursor.lastrowid
+        
+        # 2. Добавляем слова
+        if smell_words:
+            word_table = f"olfactory_words_{language}"
+            for i, word_data in enumerate(smell_words):
+                if isinstance(word_data, str):
+                    word = word_data
+                    lemma = None
+                    pos = None
+                    children = None
+                    concept = None
+                else:
+                    word = word_data.get('word', '')
+                    lemma = word_data.get('lemma')
+                    pos = word_data.get('pos')
+                    children = word_data.get("children")
+                    concept = word_data.get('concept')
+                
+                self.db.execute(f"""
+                    INSERT INTO {word_table} 
+                    (olf_id, word, lemma, pos, children, concept)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (olf_id, word, lemma, pos, children, concept))
+        
         self.db.conn.commit()
-        
-        return result[0] if result else None
-    
-    def add_many(self, language: str, sentences_list: List[tuple]) -> None:
-        """
-        Добавить несколько предложений сразу
-        
-        Args:
-            language: язык
-            sentences_list: список кортежей с данными предложений
-                Каждый кортеж должен содержать:
-                (text_id, position, sentence, [smell_words], [left_context], 
-                 [right_context], [type], [connotation], [tonal], 
-                 [gramm_structure], [comments], [verified])
-        """
-        table = self._get_table(language)
-        
-        values = []
-        for s in sentences_list:
-            text_id = s[0]
-            
-            # Проверяем текст
-            if not self._validate_text_exists(language, text_id):
-                raise ValueError(f"Текст с id {text_id} не существует в языке {language}")
-            
-            # Распаковываем с дефолтными значениями
-            position = s[1]
-            sentence = s[2]
-            smell_words = s[3] if len(s) > 3 else None
-            left_context = s[4] if len(s) > 4 else None
-            right_context = s[5] if len(s) > 5 else None
-            type_val = s[6] if len(s) > 6 else None
-            connotation = s[7] if len(s) > 7 else None
-            tonal = s[8] if len(s) > 8 else None
-            gramm_structure = s[9] if len(s) > 9 else None
-            comments = s[10] if len(s) > 10 else None
-            verified = s[11] if len(s) > 11 else False
-            
-            if isinstance(smell_words, (list, dict)):
-                smell_words = json.dumps(smell_words, ensure_ascii=False)
-            
-            values.append((text_id, position, sentence, smell_words, 
-                          left_context, right_context, type_val, connotation,
-                          tonal, gramm_structure, comments, 1 if verified else 0))
-        
-        self.db.executemany(f"""
-            INSERT INTO {table} 
-            (text_id, position, sentence, smell_words, left_context, right_context,
-             type, connotation, tonal, gramm_structure, comments, verified)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, values)
-    
-    def get_by_id(self, language: str, olf_id: int) -> Optional[Dict]:
-        """Получить ольфакторное предложение по ID"""
-        table = self._get_table(language)
-        result = self.db.execute(f"SELECT * FROM {table} WHERE id = ?", (olf_id,))
-        
-        if result:
-            return self._parse_smell_words(result[0])
-        return None
-    
-    def get_by_text(self, language: str, text_id: int) -> List[Dict]:
-        """Получить все ольфакторные предложения текста"""
-        table = self._get_table(language)
-        results = self.db.execute(
-            f"SELECT * FROM {table} WHERE text_id = ? ORDER BY position",
-            (text_id,)
-        )
-        
-        for r in results:
-            self._parse_smell_words(r)
-        return results
-    
-    def get_by_text_and_position(self, language: str, text_id: int, position: int) -> Optional[Dict]:
-        """Получить предложение по тексту и позиции"""
-        table = self._get_table(language)
-        result = self.db.execute(
-            f"SELECT * FROM {table} WHERE text_id = ? AND position = ?",
-            (text_id, position)
-        )
-        
-        if result:
-            return self._parse_smell_words(result[0])
-        return None
-    
-    def search_by_smell_word(self, language: str, word: str) -> List[Dict]:
-        """Найти все предложения, содержащие слово-запах"""
-        table = self._get_table(language)
-        results = self.db.execute(
-            f"SELECT * FROM {table} WHERE smell_words LIKE ?",
-            (f'%"{word}"%',)  # Ищем точное слово в JSON
-        )
-        
-        for r in results:
-            self._parse_smell_words(r)
-        return results
+        return olf_id
     
     def update(self, language: str, olf_id: int, **kwargs) -> bool:
         """
@@ -426,15 +294,14 @@ class OlfactoryManager:
             language: язык
             olf_id: ID предложения
             **kwargs: поля для обновления
-                Можно обновлять: smell_words, left_context, right_context,
+                Можно обновлять: smell_words
                 type, connotation, tonal, gramm_structure, comments, verified
         """
-        table = self._get_table(language)
+        table = self._get_language_table(language)
         
         # Разрешенные поля для обновления
         allowed_fields = [
-            'smell_words', 'left_context', 'right_context',
-            'type', 'connotation', 'tonal', 'gramm_structure', 
+            'smell_words','type', 'connotation', 'tonal', 'gramm_structure', 
             'comments', 'verified'
         ]
         
@@ -462,413 +329,367 @@ class OlfactoryManager:
         
         return bool(self.db.execute(query, values))
     
-    def update_smell_words(self, language: str, olf_id: int, 
-                          smell_words: Union[List, Dict, str]) -> bool:
-        """Обновить список слов-запахов"""
-        return self.update(language, olf_id, smell_words=smell_words)
-    
-    def mark_verified(self, language: str, olf_id: int, verified: bool = True) -> bool:
-        """Отметить предложение как проверенное"""
-        return self.update(language, olf_id, verified=verified)
-    
     def delete(self, language: str, olf_id: int) -> bool:
         """Удалить ольфакторное предложение"""
-        table = self._get_table(language)
+        table = self._get_language_table(language)
         return bool(self.db.execute(f"DELETE FROM {table} WHERE id = ?", (olf_id,)))
-    
+
     def delete_by_text(self, language: str, text_id: int) -> bool:
         """Удалить все предложения текста"""
-        table = self._get_table(language)
+        table = self._get_language_table(language)
         return bool(self.db.execute(
             f"DELETE FROM {table} WHERE text_id = ?", 
             (text_id,)
         ))
-    
-    # Методы для работы с выравниванием (alignments)
-    
-    def align(self, ru_id: int, en_id: int, verified: bool = False) -> None:
-        """Связать русское и английское ольфакторные предложения"""
-        self.db.execute("""
-            INSERT OR REPLACE INTO olfactory_alignments (ru_id, en_id, verified)
-            VALUES (?, ?, ?)
-        """, (ru_id, en_id, 1 if verified else 0))
-    
-    def get_aligned(self, from_lang: str, from_id: int, to_lang: str) -> Optional[Dict]:
-        """
-        Получить соответствие для предложения
-        
-        Args:
-            from_lang: язык исходного предложения
-            from_id: ID исходного предложения
-            to_lang: язык целевого предложения
-        """
-        if from_lang == 'ru' and to_lang == 'en':
-            result = self.db.execute("""
-                SELECT o_en.* FROM olfactory_alignments a
-                JOIN olfactory_en o_en ON a.en_id = o_en.id
-                WHERE a.ru_id = ?
-            """, (from_id,))
-        elif from_lang == 'en' and to_lang == 'ru':
-            result = self.db.execute("""
-                SELECT o_ru.* FROM olfactory_alignments a
-                JOIN olfactory_ru o_ru ON a.ru_id = o_ru.id
-                WHERE a.en_id = ?
-            """, (from_id,))
-        else:
-            raise ValueError(f"Неподдерживаемая пара языков: {from_lang} -> {to_lang}")
-        
-        if result:
-            return self._parse_smell_words(result[0])
-        return None
-    
-    def get_aligned_en(self, ru_id: int) -> Optional[Dict]:
-        """Получить английское соответствие для русского предложения"""
-        return self.get_aligned('ru', ru_id, 'en')
-    
-    def get_aligned_ru(self, en_id: int) -> Optional[Dict]:
-        """Получить русское соответствие для английского предложения"""
-        return self.get_aligned('en', en_id, 'ru')
-    
-    def get_unaligned(self, language: str, text_id: Optional[int] = None) -> List[Dict]:
-        """
-        Получить предложения без соответствия
-        
-        Args:
-            language: язык ('ru' или 'en')
-            text_id: если указан, только для конкретного текста
-        """
-        if language == 'ru':
-            query = """
-                SELECT o.* FROM olfactory_ru o
-                LEFT JOIN olfactory_alignments a ON o.id = a.ru_id
-                WHERE a.ru_id IS NULL
-            """
-            params = []
-        elif language == 'en':
-            query = """
-                SELECT o.* FROM olfactory_en o
-                LEFT JOIN olfactory_alignments a ON o.id = a.en_id
-                WHERE a.en_id IS NULL
-            """
-            params = []
-        else:
-            raise ValueError(f"Язык {language} не поддерживается для выравнивания")
-        
-        if text_id:
-            query += f" AND o.text_id = ?"
-            params.append(text_id)
-        
-        query += " ORDER BY o.position"
-        
-        results = self.db.execute(query, tuple(params))
-        for r in results:
-            self._parse_smell_words(r)
-        return results
-    
-    def get_unaligned_ru(self, text_id: Optional[int] = None) -> List[Dict]:
-        """Получить русские предложения без английского соответствия"""
-        return self.get_unaligned('ru', text_id)
-    
-    # Статистика и экспорт
-    
-    def get_statistics(self, language: str, text_id: Optional[int] = None) -> Dict:
-        """
-        Получить статистику по ольфакторным предложениям
-        """
-        table = self._get_table(language)
-        
-        if text_id:
-            stats = self.db.execute(f"""
-                SELECT 
-                    COUNT(*) as total,
-                    SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) as verified,
-                    SUM(CASE WHEN type = 'direct' THEN 1 ELSE 0 END) as direct,
-                    SUM(CASE WHEN type = 'metaphor' THEN 1 ELSE 0 END) as metaphor,
-                    SUM(CASE WHEN tonal = 'positive' THEN 1 ELSE 0 END) as positive,
-                    SUM(CASE WHEN tonal = 'negative' THEN 1 ELSE 0 END) as negative,
-                    SUM(CASE WHEN tonal = 'neutral' THEN 1 ELSE 0 END) as neutral,
-                    AVG(json_array_length(smell_words)) as avg_smells,
-                    COUNT(DISTINCT smell_words) as unique_smell_patterns
-                FROM {table}
-                WHERE text_id = ?
-            """, (text_id,))[0]
-        else:
-            stats = self.db.execute(f"""
-                SELECT 
-                    COUNT(*) as total,
-                    COUNT(DISTINCT text_id) as texts,
-                    SUM(CASE WHEN verified = 1 THEN 1 ELSE 0 END) as verified,
-                    SUM(CASE WHEN type = 'direct' THEN 1 ELSE 0 END) as direct,
-                    SUM(CASE WHEN type = 'metaphor' THEN 1 ELSE 0 END) as metaphor,
-                    SUM(CASE WHEN tonal = 'positive' THEN 1 ELSE 0 END) as positive,
-                    SUM(CASE WHEN tonal = 'negative' THEN 1 ELSE 0 END) as negative,
-                    SUM(CASE WHEN tonal = 'neutral' THEN 1 ELSE 0 END) as neutral,
-                    AVG(json_array_length(smell_words)) as avg_smells,
-                    COUNT(DISTINCT smell_words) as unique_smell_patterns
-                FROM {table}
-            """)[0]
-        
-        # Преобразуем None в 0
-        return {k: v or 0 for k, v in stats.items()}
-    
-    def get_smell_words_frequency(self, language: str, text_id: Optional[int] = None) -> Dict[str, int]:
-        """
-        Получить частотность слов-запахов
-        """
-        table = self._get_table(language)
-        
-        if text_id:
-            results = self.db.execute(
-                f"SELECT smell_words FROM {table} WHERE text_id = ? AND smell_words IS NOT NULL",
-                (text_id,)
-            )
-        else:
-            results = self.db.execute(
-                f"SELECT smell_words FROM {table} WHERE smell_words IS NOT NULL"
-            )
-        
-        frequency = {}
-        for r in results:
-            if r['smell_words']:
-                try:
-                    words = json.loads(r['smell_words'])
-                    if isinstance(words, list):
-                        for word in words:
-                            frequency[word] = frequency.get(word, 0) + 1
-                except:
-                    pass
-        
-        return dict(sorted(frequency.items(), key=lambda x: x[1], reverse=True))
-    
-    def export_to_csv(self, language: str, text_id: Optional[int] = None) -> List[Dict]:
-        """
-        Экспортировать данные для CSV анализа
-        """
-        if text_id:
-            query = f"""
-                SELECT 
-                    t.id as txt_ID,
-                    t.title as txt_title,
-                    t.author as txt_author,
-                    t.year as txt_year,
-                    t.text_type,
-                    o.position as sent_position,
-                    o.sentence as sent_text,
-                    o.smell_words,
-                    o.left_context,
-                    o.right_context,
-                    o.type,
-                    o.connotation,
-                    o.tonal,
-                    o.gramm_structure,
-                    o.comments,
-                    o.verified
-                FROM olfactory_{language} o
-                JOIN texts_{language} t ON o.text_id = t.id
-                WHERE o.text_id = ?
-                ORDER BY o.position
-            """
-            results = self.db.execute(query, (text_id,))
-        else:
-            query = f"""
-                SELECT 
-                    t.id as txt_ID,
-                    t.title as txt_title,
-                    t.author as txt_author,
-                    t.year as txt_year,
-                    t.text_type,
-                    o.position as sent_position,
-                    o.sentence as sent_text,
-                    o.smell_words,
-                    o.left_context,
-                    o.right_context,
-                    o.type,
-                    o.connotation,
-                    o.tonal,
-                    o.gramm_structure,
-                    o.comments,
-                    o.verified
-                FROM olfactory_{language} o
-                JOIN texts_{language} t ON o.text_id = t.id
-                ORDER BY t.id, o.position
-            """
-            results = self.db.execute(query)
-        
-        # Парсим JSON для удобства
-        for r in results:
-            if r['smell_words']:
-                try:
-                    r['smell_words'] = json.loads(r['smell_words'])
-                except:
-                    pass
-        
-        return results
 
-    def export_alignment_csv(self, ru_text_id: int, en_text_id: int, 
-                            output_path: str = None) -> str:
+class CsvExporter(BaseManager):
+    
+    def export_aligned_data(self, output_path: str = None, 
+                        ru_text_id: int = None, 
+                        en_text_id: int = None) -> Union[List[Dict], str]:
         """
-        Экспортирует выровненные ольфакторные предложения в CSV
-        
+        Экспортирует выровненные предложения
         Args:
-            ru_text_id: ID русского текста
-            en_text_id: ID английского перевода
-            output_path: путь для сохранения CSV
-        
-        Returns:
-            str: путь к созданному CSV файлу
+            output_path: путь для сохранения CSV (если None - вернет список)
+            ru_text_id: ID русского текста (опционально)
+            en_text_id: ID английского текста (опционально)
         """
         import pandas as pd
-        from pathlib import Path
-        import json
         
-        # 1. Получаем все русские предложения
-        ru_sentences = self.get_by_text('ru', ru_text_id)
-        
-        # 2. Получаем все английские предложения
-        en_sentences = self.get_by_text('en', en_text_id)
-        en_by_id = {s['id']: s for s in en_sentences}
-        
-        # 3. Получаем все выравнивания
-        alignments = self.db.execute("""
-            SELECT ru_id, en_id, verified as alignment_verified
-            FROM olfactory_alignments
-            WHERE ru_id IN (SELECT id FROM olfactory_ru WHERE text_id = ?)
-            AND en_id IN (SELECT id FROM olfactory_en WHERE text_id = ?)
-        """, (ru_text_id, en_text_id))
-        
-        alignment_map = {a['ru_id']: a['en_id'] for a in alignments}
-        
-        # 4. Формируем данные для CSV
         rows = []
         
-        for ru_sent in ru_sentences:
-            en_id = alignment_map.get(ru_sent['id'])
-            en_sent = en_by_id.get(en_id) if en_id else None
+        # Формируем запрос
+        if ru_text_id and en_text_id:
+            alignments = self.db.execute("""
+                SELECT a.ru_id, a.en_id, a.verified as alignment_verified
+                FROM olfactory_alignments a
+                WHERE a.ru_id IN (SELECT id FROM sent_ru WHERE text_id = ?)
+                AND a.en_id IN (SELECT id FROM sent_en WHERE text_id = ?)
+                ORDER BY a.ru_id
+            """, (ru_text_id, en_text_id))
+        else:
+            alignments = self.db.execute("""
+                SELECT ru_id, en_id, verified as alignment_verified
+                FROM olfactory_alignments
+                ORDER BY ru_id
+            """)
+        
+        for align in alignments:
+            # Получаем русское предложение
+            ru_sent = self.db.execute(
+                "SELECT * FROM sent_ru WHERE id = ?",
+                (align['ru_id'],)
+            )
+            # Получаем английское предложение
+            en_sent = self.db.execute(
+                "SELECT * FROM sent_en WHERE id = ?",
+                (align['en_id'],)
+            )
+            if not ru_sent or not en_sent:
+                continue
+                
+            ru_sent = ru_sent[0]
+            en_sent = en_sent[0]
             
-            # Парсим слова-запахи
-            ru_words = self._parse_smell_words_to_list(ru_sent.get('smell_words', []))
-            en_words = self._parse_smell_words_to_list(en_sent.get('smell_words', [])) if en_sent else []
+            # Получаем русские слова-запахи
+            ru_words = self.db.execute("SELECT * FROM olfactory_words_ru WHERE olf_id = ?", (align['ru_id'],))
+            # Получаем английские слова-запахи
+            en_words = self.db.execute("SELECT * FROM olfactory_words_en WHERE olf_id = ?", (align['en_id'],))
             
-            # Определяем максимальное количество токенов
-            max_tokens = max(len(ru_words), len(en_words))
+            # Если слов нет - создаем одну строку с пустыми значениями
+            if not ru_words:
+                ru_words = [{'word': '', 'pos': '', 'concept': ''}]
+            if not en_words:
+                en_words = [{'word': '', 'pos': '', 'concept': ''}]
             
-            for i in range(max_tokens):
-                # Русский токен
+            # Берем максимальное количество слов для создания строк
+            max_words = max(len(ru_words), len(en_words))
+            
+            for i in range(max_words):
                 ru_word = ru_words[i] if i < len(ru_words) else {}
                 en_word = en_words[i] if i < len(en_words) else {}
                 
                 row = {
                     # Русская часть
-                    'txt_ID': ru_sent['text_id'],
-                    'case_iD': ru_sent['text_id'],  # или что-то другое?
-                    'sent_ID': ru_sent['id'],
-                    'sent_text_RU': ru_sent['sentence'] if i == 0 else '',
-                    'token_ID': i + 1,
-                    'token_RU': ru_word.get('word', ''),
-                    'token_pos': ru_word.get('pos', ''),
-                    'concept_unit_RU': ru_word.get('concept', ru_word.get('word', '')),
-                    'type_RU': ru_sent.get('type', ''),
-                    'connotation_RU': ru_sent.get('connotation', ''),
-                    'IntensityRU': '',
-                    'tonality_RU': ru_sent.get('tonal', ''),
-                    'gram_structureRU': ru_sent.get('gramm_structure', ''),
-                    'comments_RU': ru_sent.get('comments', ''),
+                    'ru_text_id': ru_sent.get('text_id', ''),
+                    'ru_sent_id': ru_sent.get('id', ''),
+                    'ru_position': ru_sent.get('position', ''),
+                    'ru_sentence': ru_sent.get('sentence', '') if i == 0 else '',
+
+                    # Русские токены
+                    'ru_token': ru_word.get('word', ''),
+                    'ru_token_pos': ru_word.get('pos', ''),
+                    'ru_concept': ru_word.get('concept', ''),
+
+                    # Аннотации (только для первой строки)
+                    'ru_type': ru_sent.get('type', '') if i == 0 else '',
+                    'ru_connotation': ru_sent.get('connotation', '') if i == 0 else '',
+                    'ru_intensity': '',
+                    'ru_tonality': ru_sent.get('tonal', '') if i == 0 else '',
+                    'ru_gram_structure': ru_sent.get('gramm_structure', '') if i == 0 else '',
+                    'ru_comments': ru_sent.get('comments', '') if i == 0 else '',
                     
                     # Английская часть
-                    'trans_text_ID': en_sent['text_id'] if en_sent else '',
-                    'txt_ID_en': en_sent['text_id'] if en_sent else '',
-                    'sent_text_EN': en_sent['sentence'] if en_sent and i == 0 else '',
-                    'concept_unit_EN': en_word.get('concept', en_word.get('word', '')),
-                    'token_EN': en_word.get('word', ''),
-                    'token_pos_EN': en_word.get('pos', ''),
-                    'gram.structure_EN': en_sent.get('gramm_structure', '') if en_sent else '',
-                    'type_EN': en_sent.get('type', '') if en_sent else '',
-                    'connotation_EN': en_sent.get('connotation', '') if en_sent else '',
-                    'intensity_EN': '',
-                    'tonality_EN': en_sent.get('tonal', '') if en_sent else '',
-                    'comments_EN': en_sent.get('comments', '') if en_sent else '',
-                    
+                    'en_text_id': en_sent.get('text_id', ''),
+                    'en_sent_id': en_sent.get('id', ''),
+                    'en_position': en_sent.get('position', ''),
+                    'en_sentence': en_sent.get('sentence', '') if i == 0 else '',
+
+                    # Английские токены
+                    'en_token': en_word.get('word', ''),
+                    'en_token_pos': en_word.get('pos', ''),
+                    'en_concept': en_word.get('concept', ''),
+
+                    # Аннотации (только для первой строки)
+                    'en_type': en_sent.get('type', '') if i == 0 else '',
+                    'en_connotation': en_sent.get('connotation', '') if i == 0 else '',
+                    'en_intensity': '',
+                    'en_tonality': en_sent.get('tonal', '') if i == 0 else '',
+                    'en_gram_structure': en_sent.get('gramm_structure', '') if i == 0 else '',
+                    'en_comments': en_sent.get('comments', '') if i == 0 else '',
+
                     # Метаданные
-                    'translation_shift': 'aligned' if en_sent else 'not_aligned',
+                    'translation_shift': 'aligned',
                     'cosine_sim_LaBSE': '',
                     'shift_notes': '',
-                    'verified': ru_sent.get('verified', 0) and (en_sent.get('verified', 0) if en_sent else 0)
+                    'verified': 1 if (ru_sent.get('verified', 0) and en_sent.get('verified', 0)) else 0
                 }
                 rows.append(row)
         
-        # 5. Создаем DataFrame
-        df = pd.DataFrame(rows)
-        
-        # 6. Сохраняем
         if output_path is None:
-            ru_text = self.db.texts.get_by_id('ru', ru_text_id)
-            en_text = self.db.texts.get_by_id('en', en_text_id)
-            
-            ru_title = ru_text['title'][:30].replace(' ', '_') if ru_text else f"ru_{ru_text_id}"
-            en_title = en_text['title'][:30].replace(' ', '_') if en_text else f"en_{en_text_id}"
-            
-            output_path = f"alignment_{ru_title}_to_{en_title}.csv"
+            return rows
         
+        df = pd.DataFrame(rows)
         df.to_csv(output_path, index=False, encoding='utf-8-sig')
+        
         print(f"✅ CSV сохранен: {output_path}")
-        print(f"📊 Всего строк: {len(df)}")
+        print(f"📊 Всего строк: {len(rows)}")
         
         return output_path
 
-def _parse_smell_words_to_list(self, smell_words):
-    """Вспомогательный метод для парсинга smell_words в список"""
-    if isinstance(smell_words, str):
-        try:
-            return json.loads(smell_words)
-        except:
-            return []
-    elif isinstance(smell_words, list):
-        return smell_words
-    return []
-        
-    def get_context(self, language: str, olf_id: int, window: int = 100) -> Optional[Dict]:
+class AlignmentHelper(BaseManager):
+    
+    def export_for_alignment(self, ru_text_id: int, en_text_id: int, 
+                            output_path: str = None,
+                            only_unmatched: bool = True) -> str:
         """
-        Получить предложение с расширенным контекстом
+        Экспортирует Excel для ручного выравнивания
         
         Args:
-            language: язык
-            olf_id: ID предложения
-            window: сколько символов контекста слева и справа
+            ru_text_id: ID русского текста
+            en_text_id: ID английского текста
+            output_path: путь для сохранения
+            only_unmatched: если True - только невыровненные предложения
         """
-        olf = self.get_by_id(language, olf_id)
-        if not olf:
-            return None
+        import pandas as pd
         
-        # Получаем полный текст
-        text_result = self.db.execute(
-            f"SELECT content FROM texts_{language} WHERE id = ?",
-            (olf['text_id'],)
-        )
-        if not text_result:
-            return olf
-        
-        full_text = text_result[0]['content']
-        
-        # Ищем предложение в тексте (упрощенно)
-        sentence = olf['sentence']
-        pos = full_text.find(sentence)
-        
-        if pos >= 0:
-            # Вырезаем контекст
-            start = max(0, pos - window)
-            end = min(len(full_text), pos + len(sentence) + window)
+        # Получаем уже существующие выравнивания
+        existing_alignments = {}
+        if only_unmatched:
+            existing = self.db.execute("""
+                SELECT ru_id, en_id 
+                FROM olfactory_alignments 
+                WHERE ru_id IN (SELECT id FROM sent_ru WHERE text_id = ?)
+                AND en_id IN (SELECT id FROM sent_en WHERE text_id = ?)
+            """, (ru_text_id, en_text_id))
             
-            context_text = full_text[start:end]
+            for a in existing:
+                existing_alignments[a['ru_id']] = a['en_id']
+        
+        # Получаем русские предложения
+        ru_sentences = self.db.execute("""
+            SELECT id, sentence, position
+            FROM sent_ru 
+            WHERE text_id = ? 
+            ORDER BY position
+        """, (ru_text_id,))
+        
+        # Фильтруем: оставляем только невыровненные
+        ru_to_align = []
+        for ru in ru_sentences:
+            if only_unmatched and ru['id'] in existing_alignments:
+                continue  # пропускаем уже выровненные
+            ru_to_align.append({
+                'ru_id': ru['id'],
+                'position': ru['position'],
+                'ru_sentence': ru['sentence'],
+                'aligned_en_id': '',  # пустое поле для заполнения
+                'status': 'new'  # пометка, что это новое
+            })
+        
+        # Получаем английские предложения (все, для справки)
+        en_sentences = self.db.execute("""
+            SELECT id, sentence, position
+            FROM sent_en 
+            WHERE text_id = ? 
+            ORDER BY position
+        """, (en_text_id,))
+        
+        en_df = pd.DataFrame([{
+            'en_id': en['id'],
+            'position': en['position'],
+            'en_sentence': en['sentence']
+        } for en in en_sentences])
+        
+        # Создаем DataFrame с русскими
+        ru_df = pd.DataFrame(ru_to_align)
+        
+        # Сохраняем - ИСПРАВЛЕНО!
+        if output_path is None:
+            # Просто используем ID в имени файла
+            output_path = f"alignment_{ru_text_id}_to_{en_text_id}.xlsx"
+        
+        with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
+            ru_df.to_excel(writer, sheet_name='Русские (невыровненные)', index=False)
+            en_df.to_excel(writer, sheet_name='Английские (справочник)', index=False)
             
-            # Добавляем ... если обрезали
-            if start > 0:
-                context_text = '...' + context_text
-            if end < len(full_text):
-                context_text = context_text + '...'
-        else:
-            context_text = sentence
+            # Добавляем третий лист со статистикой
+            stats = pd.DataFrame([{
+                'Всего русских': len(ru_sentences),
+                'Уже выровнено': len(existing_alignments),
+                'Осталось выровнять': len(ru_to_align),
+                'Всего английских': len(en_sentences)
+            }])
+            stats.to_excel(writer, sheet_name='Статистика', index=False)
+        
+        print(f"📝 Шаблон создан: {output_path}")
+        print(f"\n📊 СТАТИСТИКА:")
+        print(f"   Всего русских предложений: {len(ru_sentences)}")
+        print(f"   Уже выровнено: {len(existing_alignments)}")
+        print(f"   Осталось выровнять: {len(ru_to_align)}")
+        print(f"   Всего английских: {len(en_sentences)}")
+        
+        if len(ru_to_align) == 0:
+            print(f"\n✅ Все предложения уже выровнены! Ничего делать не нужно.")
+        
+        return output_path
+        
+    def import_alignment_from_excel(self, excel_path: str, 
+                                    ru_text_id: int = None,
+                                    en_text_id: int = None,
+                                    clear_existing: bool = False) -> Dict:
+        """
+        Импортирует выравнивания из размеченного Excel
+        
+        Args:
+            excel_path: путь к Excel с заполненным aligned_en_id
+            ru_text_id: ID русского текста (опционально, для проверки)
+            en_text_id: ID английского текста (опционально, для проверки)
+            clear_existing: удалить существующие выравнивания перед импортом
+        """
+        import pandas as pd
+        
+        # Читаем лист с русскими (название может быть разным)
+        try:
+            df = pd.read_excel(excel_path, sheet_name='Русские (невыровненные)', engine='openpyxl')
+        except:
+            # Если нет такого листа, пробуем старый формат
+            df = pd.read_excel(excel_path, sheet_name='Русские', engine='openpyxl')
+        
+        # Проверяем колонки
+        required_cols = ['ru_id', 'aligned_en_id']
+        for col in required_cols:
+            if col not in df.columns:
+                raise ValueError(f"В Excel нет колонки {col}")
+        
+        # Очищаем существующие выравнивания если нужно
+        if clear_existing:
+            if ru_text_id and en_text_id:
+                self.db.execute("""
+                    DELETE FROM olfactory_alignments 
+                    WHERE ru_id IN (SELECT id FROM sent_ru WHERE text_id = ?)
+                    AND en_id IN (SELECT id FROM sent_en WHERE text_id = ?)
+                """, (ru_text_id, en_text_id))
+                print(f"🧹 Удалены старые выравнивания")
+            else:
+                self.db.execute("DELETE FROM olfactory_alignments")
+                print(f"🧹 Удалены все выравнивания")
+        
+        # Собираем выравнивания
+        alignments = []
+        skipped = 0
+        not_found = 0
+        already_exists = 0
+        
+        for idx, row in df.iterrows():
+            ru_id = row['ru_id']
+            en_id = row['aligned_en_id']
+            
+            # Пропускаем пустые
+            if pd.isna(en_id) or en_id == '':
+                skipped += 1
+                continue
+            
+            en_id = int(en_id)
+            
+            # Проверяем существование
+            ru_exists = self.db.execute("SELECT id FROM sent_ru WHERE id = ?", (ru_id,))
+            en_exists = self.db.execute("SELECT id FROM sent_en WHERE id = ?", (en_id,))
+            
+            if not ru_exists:
+                print(f"⚠️ Русское {ru_id} не найдено")
+                not_found += 1
+                continue
+                
+            if not en_exists:
+                print(f"⚠️ Английское {en_id} не найдено")
+                not_found += 1
+                continue
+            
+            # Проверяем тексты
+            if ru_text_id:
+                ru_text = self.db.execute("SELECT text_id FROM sent_ru WHERE id = ?", (ru_id,))
+                if ru_text and ru_text[0]['text_id'] != ru_text_id:
+                    print(f"⚠️ Русское {ru_id} не из текста {ru_text_id}")
+                    not_found += 1
+                    continue
+            
+            if en_text_id:
+                en_text = self.db.execute("SELECT text_id FROM sent_en WHERE id = ?", (en_id,))
+                if en_text and en_text[0]['text_id'] != en_text_id:
+                    print(f"⚠️ Английское {en_id} не из текста {en_text_id}")
+                    not_found += 1
+                    continue
+            
+            # Проверяем, не существует ли уже это выравнивание
+            if not clear_existing:
+                existing = self.db.execute("""
+                    SELECT id FROM olfactory_alignments 
+                    WHERE ru_id = ? AND en_id = ?
+                """, (ru_id, en_id))
+                if existing:
+                    already_exists += 1
+                    continue
+            
+            alignments.append((ru_id, en_id))
+        
+        # Сохраняем в БД
+        inserted = 0
+        for ru_id, en_id in alignments:
+            try:
+                self.db.execute("""
+                    INSERT OR REPLACE INTO olfactory_alignments (ru_id, en_id, verified)
+                    VALUES (?, ?, ?)
+                """, (ru_id, en_id, 0))
+                inserted += 1
+            except Exception as e:
+                print(f"❌ Ошибка: {ru_id}->{en_id}: {e}")
+        
+        self.db.conn.commit()
+        
+        print(f"\n📊 РЕЗУЛЬТАТЫ ИМПОРТА:")
+        print(f"   ✅ Добавлено новых: {inserted}")
+        print(f"   ⏭️ Пропущено (пустые aligned_en_id): {skipped}")
+        print(f"   ⚠️ Не найдено в БД: {not_found}")
+        print(f"   🔄 Уже существовало: {already_exists}")
+        print(f"   📝 Всего строк в Excel: {len(df)}")
         
         return {
-            **olf,
-            'full_text_excerpt': context_text
+            'inserted': inserted,
+            'skipped': skipped,
+            'not_found': not_found,
+            'already_exists': already_exists,
+            'total': len(df)
         }
+        
+    

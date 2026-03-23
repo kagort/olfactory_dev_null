@@ -1,12 +1,5 @@
 from .core import Database
-from .managers import TableManager, TextManager, OlfactoryManager  # ← изменили импорты
-
-# Заглушка для словаря (если не используется)
-class DummyDict:
-    def check(self, word, language): return False
-    def get_all(self, language=None): return []
-    def add(self, word, language): return True
-
+from .managers import *
 
 class OlfactoryDB:
     """Главный класс для работы с БД"""
@@ -17,11 +10,11 @@ class OlfactoryDB:
         # Инициализируем менеджеры (обновленные)
         self.tables = TableManager(self.db)
         self.texts = TextManager(self.db)
-        self.olfactory = OlfactoryManager(self.db)  # ← новый менеджер вместо sentences и olfactory_tokens
+        self.olfactory = OlfactoryManager(self.db)  
+        self.csv = CsvExporter(self.db)
+        self.alignment = AlignmentHelper(self.db)
         
-        # Заглушка для обратной совместимости
-        self.dict = DummyDict()
-    
+        
     def init(self):
         """Создает все таблицы"""
         self.tables.create_all()
