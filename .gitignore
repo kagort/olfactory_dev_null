@@ -3,17 +3,14 @@ __pycache__/
 *.pyc
 *.pyo
 
-# Data exports
-data/csv/
-*.csv
-*.xlsx
-
 # Database
 *.db
 
 # Books
-book/
 books/
+
+# md-пометки
+other/
 
 # Virtual environment
 venv/

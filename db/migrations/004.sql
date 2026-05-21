@@ -1,0 +1,2 @@
+-- Пример
+-- ALTER TABLE translations ADD COLUMN content TEXT;
