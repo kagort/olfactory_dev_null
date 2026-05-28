@@ -6,8 +6,10 @@ __pycache__/
 # Database
 *.db
 
-# Books
-books/
+# Books (исключаем корневую папку books/, но data/books/ отслеживаем)
+/books/
+data/books/raw/*.db
+data/books/raw/*.pyc
 
 # md-пометки
 other/

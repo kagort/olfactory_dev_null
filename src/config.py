@@ -16,7 +16,7 @@ BACKUP_DIR = PROJECT_ROOT / "db" / "backups"
 BACKUP_DIR.mkdir(parents=True, exist_ok=True)
 
 # Пути к данным
-DATA_DIR = PROJECT_ROOT / "data" / "raw"
+DATA_DIR = PROJECT_ROOT / "data" / "books" / "raw"
 CSV_PATH = PROJECT_ROOT / "data" / "metadata.csv"
 
 # результаты
