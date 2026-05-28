@@ -58,13 +58,6 @@ def _cosine_matrix(a: np.ndarray, b: np.ndarray) -> np.ndarray:
     return a_norm @ b_norm.T
 
 
-def _normalize_positions(positions: np.ndarray) -> np.ndarray:
-    """Нормализует позиции предложений в диапазон [0, 1]."""
-    max_pos = positions.max()
-    if max_pos == 0:
-        return positions.astype(float)
-    return positions / max_pos
-
 
 # ── Основная функция ─────────────────────────────────────────────────────────
 
@@ -121,9 +114,19 @@ def auto_align_sentences(
         ORDER BY position
     """, conn)
 
+    total_ru = conn.execute(
+        "SELECT MAX(position) FROM sentences WHERE source_type='original' AND text_id=?",
+        (ru_text_id,)
+    ).fetchone()[0] or len(df_ru)
+
+    total_en = conn.execute(
+        "SELECT MAX(position) FROM sentences WHERE source_type='translation' AND translation_id=?",
+        (translation_id,)
+    ).fetchone()[0] or len(df_en)
+
     print(f"\n📊 Предложений для выравнивания:")
-    print(f"   RU (text_id={ru_text_id}):  {len(df_ru)}")
-    print(f"   EN (translation_id={translation_id}): {len(df_en)}")
+    print(f"   RU (text_id={ru_text_id}):  {len(df_ru)} ольфакторных из {total_ru} всего")
+    print(f"   EN (translation_id={translation_id}): {len(df_en)} ольфакторных из {total_en} всего")
 
     if df_ru.empty or df_en.empty:
         print("⚠️  Нечего выравнивать.")
@@ -141,13 +144,14 @@ def auto_align_sentences(
 
     # ── 4. Позиционное окно ──────────────────────────────────────────────────
     if use_position_window:
-        ru_pos = _normalize_positions(df_ru["position"].values)
-        en_pos = _normalize_positions(df_en["position"].values)
+        # Нормализуем по полной длине текста, а не по максимуму среди ольфакторных
+        ru_pos = df_ru["position"].values / total_ru
+        en_pos = df_en["position"].values / total_en
         # Матрица расстояний по позиции (n_ru × n_en)
         pos_diff = np.abs(ru_pos[:, None] - en_pos[None, :])
         # Обнуляем сходство для кандидатов вне окна
         sim_matrix = np.where(pos_diff <= window_size, sim_matrix, 0.0)
-        print(f"   Позиционное окно: ±{window_size*100:.0f}% от длины текста")
+        print(f"   Позиционное окно: ±{window_size*100:.0f}% | RU всего предл.: {total_ru}, EN всего предл.: {total_en}")
 
     # ── 5. Лучший кандидат для каждого RU предложения ────────────────────────
     cursor = conn.cursor()

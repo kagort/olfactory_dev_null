@@ -113,22 +113,25 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
         print(f"   Русских (невыровненных): {len(df_ru)}")
     print(f"   Английских (всего): {len(df_en)}")
     
-    # Добавляем пустую колонку для ID
-    df_ru['aligned_en_id'] = ''
-    
-    # Сохраняем в Excel
-    # output_path = Path(output_path)
-    # output_path.parent.mkdir(parents=True, exist_ok=True)
-    
+    # Добавляем порядковые номера — чтобы не работать с глобальными sentence_id
+    df_ru = df_ru.reset_index(drop=True)
+    df_ru.insert(0, '№', range(1, len(df_ru) + 1))
+    df_ru['aligned_en_№'] = ''
+
+    df_en = df_en.reset_index(drop=True)
+    df_en.insert(0, '№', range(1, len(df_en) + 1))
+
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
-        df_ru.to_excel(writer, sheet_name='Русские', index=False)
-        df_en.to_excel(writer, sheet_name='Английские', index=False)
-    
+        df_ru[['№', 'ru_id', 'position', 'sentence', 'aligned_en_№']].to_excel(
+            writer, sheet_name='Русские', index=False)
+        df_en[['№', 'en_id', 'position', 'sentence']].to_excel(
+            writer, sheet_name='Английские', index=False)
+
     print(f"\n✅ Экспортировано в {output_path}")
     print(f"\n📝 Инструкция:")
     print(f"   1. Откройте файл в Excel")
-    print(f"   2. На листе 'Английские' найдите ID нужного перевода")
-    print(f"   3. На листе 'Русские' заполните колонку 'aligned_en_id'")
+    print(f"   2. На листе 'Английские' найдите нужное предложение по колонке '№'")
+    print(f"   3. На листе 'Русские' заполните колонку 'aligned_en_№' (порядковый номер из EN-листа)")
     print(f"   4. Сохраните файл")
     print(f"   5. Запустите импорт: python src/alignment.py --import --file {output_path}")
     
@@ -148,30 +151,46 @@ def import_alignment_from_excel(conn, excel_path=ALIGNMENT_FILE):
         print(f"❌ Файл не найден: {excel_path}")
         return None
     
-    # Читаем только лист с русскими (где заполнены aligned_en_id)
-    df = pd.read_excel(excel_path, sheet_name='Русские', engine='openpyxl')
-    
-    # Фильтруем заполненные строки
+    df_ru_sheet = pd.read_excel(excel_path, sheet_name='Русские', engine='openpyxl')
+
+    # Поддерживаем оба формата: новый (aligned_en_№) и старый (aligned_en_id)
+    use_seq = 'aligned_en_№' in df_ru_sheet.columns
+    fill_col = 'aligned_en_№' if use_seq else 'aligned_en_id'
+
+    en_num_to_id = {}
+    if use_seq:
+        df_en_sheet = pd.read_excel(excel_path, sheet_name='Английские', engine='openpyxl')
+        en_num_to_id = dict(zip(df_en_sheet['№'].astype(int), df_en_sheet['en_id'].astype(int)))
+
+    df = df_ru_sheet
     df_filled = df[
-        df['aligned_en_id'].notna() & 
-        (df['aligned_en_id'] != '') &
-        (df['aligned_en_id'].astype(str).str.strip() != '')
+        df[fill_col].notna() &
+        (df[fill_col] != '') &
+        (df[fill_col].astype(str).str.strip() != '')
     ]
-    
+
     if df_filled.empty:
-        print("❌ Нет заполненных пар (колонка aligned_en_id пуста)")
+        print(f"❌ Нет заполненных пар (колонка '{fill_col}' пуста)")
         return None
-    
+
     print(f"\n📥 Импорт выровненных пар...")
     print(f"   Найдено заполненных строк: {len(df_filled)}")
-    
+
     cursor = conn.cursor()
     stats = {'inserted': 0, 'already': 0, 'errors': 0}
-    
+
     for _, row in df_filled.iterrows():
         try:
             ru_id = int(row['ru_id'])
-            en_id = int(row['aligned_en_id'])
+            if use_seq:
+                en_num = int(row['aligned_en_№'])
+                en_id = en_num_to_id.get(en_num)
+                if en_id is None:
+                    print(f"   ⚠️ № {en_num} не найден в листе «Английские»")
+                    stats['errors'] += 1
+                    continue
+            else:
+                en_id = int(row['aligned_en_id'])
             
             # Проверяем, существует ли уже
             cursor.execute("""
