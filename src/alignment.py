@@ -23,11 +23,12 @@ from config import DB_PATH, ALIGNMENT_FILE
 
 
 # ── Цвета для Excel ───────────────────────────────────────────────────────────
-FILL_AUTO    = PatternFill("solid", fgColor="C6EFCE")   # зелёный — авто-выравнивание
-FILL_MANUAL  = PatternFill("solid", fgColor="DDEBF7")   # синий   — ручное
-FILL_HEADER  = PatternFill("solid", fgColor="2F5496")   # тёмно-синий — шапка
-FONT_HEADER  = Font(color="FFFFFF", bold=True)
-FONT_HINT    = Font(color="888888", italic=True)
+FILL_AUTO      = PatternFill("solid", fgColor="C6EFCE")   # зелёный  — 1-й проход (RU→EN)
+FILL_SUGGESTED = PatternFill("solid", fgColor="FFEB9C")   # жёлтый   — 2-й проход (EN→RU)
+FILL_MANUAL    = PatternFill("solid", fgColor="DDEBF7")   # синий     — ручное
+FILL_HEADER    = PatternFill("solid", fgColor="2F5496")   # тёмно-синий — шапка
+FONT_HEADER    = Font(color="FFFFFF", bold=True)
+FONT_HINT      = Font(color="888888", italic=True)
 
 
 def get_texts_list(conn):
@@ -107,7 +108,7 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
         SELECT a.sentence_ru_id AS ru_id,
                a.sentence_en_id AS en_id,
                a.cosine_sim,
-               a.auto_aligned
+               COALESCE(a.auto_aligned, 0) AS auto_aligned
         FROM alignment a
         JOIN sentences sr ON sr.sentence_id = a.sentence_ru_id
         JOIN sentences se ON se.sentence_id = a.sentence_en_id
@@ -130,7 +131,9 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
     # ── 5. В EN-листе: ru_№, cosine_sim, авто ────────────────────────────────
     en_info = df_align.copy()
     en_info['ru_№']  = en_info['ru_id'].map(ru_id_to_num)
-    en_info['авто']  = en_info['auto_aligned'].map(lambda x: '✓' if x else '')
+    # авто: '✓' = первый проход, '?' = второй проход (требует проверки), '' = ручное
+    en_info['авто']  = en_info['auto_aligned'].map(
+        lambda x: '✓' if x == 1 else ('?' if x == 2 else ''))
     en_info['sim']   = en_info['cosine_sim'].map(
         lambda x: f"{x:.3f}" if pd.notna(x) else '')
 
@@ -165,10 +168,11 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
     print(f"\n✅ Сохранено: {output_path}")
     print(f"\n📝 Инструкция:")
     print(f"   1. Откройте файл. Лист «Английские» — основной рабочий лист.")
-    print(f"   2. Зелёные строки — авто-выравнивание (проверьте).")
-    print(f"   3. Пустые строки в колонке ru_№ — заполните вручную.")
-    print(f"   4. Одно RU на несколько EN: дайте им одинаковый ru_№.")
-    print(f"   5. Импорт: python src/alignment.py --import --file {output_path}")
+    print(f"   2. 🟢 Зелёные строки — 1-й проход (RU→EN), высокая уверенность.")
+    print(f"   3. 🟡 Жёлтые строки — 2-й проход (EN→RU), требуют проверки.")
+    print(f"   4. Пустые строки в колонке ru_№ — заполните вручную.")
+    print(f"   5. Одно RU на несколько EN: дайте им одинаковый ru_№.")
+    print(f"   6. Импорт: python src/alignment.py --import --file {output_path}")
 
     return output_path
 
@@ -199,22 +203,31 @@ def _format_workbook(path, df_en):
 
         # Покраска строк EN-листа
         if sheet_name == 'Английские':
+            avto_col = df_en['авто'].fillna('')
+            ru_col   = df_en['ru_№'].fillna('')
+
+            # Зелёные: первый проход (auto_aligned=1)
             auto_rows = set(
-                i + 2
-                for i, val in enumerate(df_en['авто'].fillna(''))
-                if val == '✓'
+                i + 2 for i, val in enumerate(avto_col) if val == '✓'
             )
+            # Жёлтые: второй проход (auto_aligned=2)
+            suggested_rows = set(
+                i + 2 for i, val in enumerate(avto_col) if val == '?'
+            )
+            # Синие: ручное (ru_№ заполнен, но не авто)
             manual_rows = set(
                 i + 2
-                for i, (ru_num, avto) in enumerate(
-                    zip(df_en['ru_№'].fillna(''), df_en['авто'].fillna('')))
-                if ru_num != '' and avto != '✓'
+                for i, (ru_num, avto) in enumerate(zip(ru_col, avto_col))
+                if ru_num != '' and avto == ''
             )
             for row in ws.iter_rows(min_row=2):
                 r = row[0].row
                 if r in auto_rows:
                     for cell in row:
                         cell.fill = FILL_AUTO
+                elif r in suggested_rows:
+                    for cell in row:
+                        cell.fill = FILL_SUGGESTED
                 elif r in manual_rows:
                     for cell in row:
                         cell.fill = FILL_MANUAL

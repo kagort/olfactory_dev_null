@@ -221,6 +221,158 @@ def auto_align_sentences(
     return stats
 
 
+# ── Второй проход: EN → RU (для непривязанных EN-предложений) ────────────────
+
+def auto_align_reverse(
+    ru_text_id: int,
+    translation_id: int,
+    threshold: float = 0.50,
+    use_position_window: bool = True,
+    window_size: float = 0.15,
+    dry_run: bool = False,
+) -> dict:
+    """
+    Второй проход выравнивания: для каждого EN-предложения, у которого ещё нет
+    пары в таблице alignment, ищем лучшее совпадение среди ВСЕХ RU-предложений.
+
+    Результаты записываются с auto_aligned=2, чтобы в Excel их можно было
+    выделить другим цветом (жёлтым) и проверить отдельно от первого прохода.
+
+    Параметры
+    ----------
+    threshold  : минимальный cosine_sim (по умолч. 0.50 — мягче первого прохода)
+    window_size: ширина позиционного окна (по умолч. 0.15 — чуть шире)
+    dry_run    : показать, не записывая в БД
+    """
+    conn = sqlite3.connect(DB_PATH)
+
+    # ── 1. Непривязанные EN-предложения ──────────────────────────────────────
+    df_en = pd.read_sql_query(f"""
+        SELECT sentence_id, position, sentence
+        FROM sentences
+        WHERE source_type = 'translation'
+          AND translation_id = {translation_id}
+          AND language = 'en'
+          AND sentence_id NOT IN (
+              SELECT sentence_en_id FROM alignment
+              WHERE sentence_en_id IS NOT NULL
+          )
+        ORDER BY position
+    """, conn)
+
+    # ── 2. ВСЕ RU-предложения (включая уже выровненные — для M:1) ────────────
+    df_ru = pd.read_sql_query(f"""
+        SELECT sentence_id, position, sentence
+        FROM sentences
+        WHERE source_type = 'original'
+          AND text_id = {ru_text_id}
+          AND language = 'ru'
+        ORDER BY position
+    """, conn)
+
+    total_ru = conn.execute(
+        "SELECT MAX(position) FROM sentences WHERE source_type='original' AND text_id=?",
+        (ru_text_id,)
+    ).fetchone()[0] or len(df_ru)
+
+    total_en = conn.execute(
+        "SELECT MAX(position) FROM sentences WHERE source_type='translation' AND translation_id=?",
+        (translation_id,)
+    ).fetchone()[0] or len(df_en)
+
+    print(f"\n=== Второй проход (EN->RU) ===")
+    print(f"   Непривязанных EN: {len(df_en)} из {total_en} всего")
+    print(f"   RU кандидатов:    {len(df_ru)} (включая уже выровненные)")
+
+    if df_en.empty:
+        print("[OK] Все EN-предложения уже выровнены — второй проход не нужен.")
+        conn.close()
+        return {"inserted": 0, "skipped": 0, "below_threshold": 0}
+
+    # ── 3. Кодирование ────────────────────────────────────────────────────────
+    model = get_model()
+    print("\n[...] Кодирую предложения...")
+    en_vecs = model.encode(df_en["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
+    ru_vecs = model.encode(df_ru["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
+
+    # ── 4. Матрица сходства (n_en × n_ru) ────────────────────────────────────
+    sim_matrix = _cosine_matrix(en_vecs, ru_vecs)
+
+    # ── 5. Позиционное окно ───────────────────────────────────────────────────
+    if use_position_window:
+        en_pos = df_en["position"].values / total_en
+        ru_pos = df_ru["position"].values / total_ru
+        pos_diff = np.abs(en_pos[:, None] - ru_pos[None, :])
+        sim_matrix = np.where(pos_diff <= window_size, sim_matrix, 0.0)
+        print(f"   Позиционное окно: +/-{window_size*100:.0f}%")
+
+    # ── 6. Лучший RU-кандидат для каждого непривязанного EN ──────────────────
+    cursor = conn.cursor()
+    stats = {"inserted": 0, "skipped": 0, "below_threshold": 0}
+    pairs = []
+
+    for i, en_row in df_en.iterrows():
+        row_sims = sim_matrix[df_en.index.get_loc(i)]
+        best_j = int(np.argmax(row_sims))
+        best_sim = float(row_sims[best_j])
+
+        if best_sim < threshold:
+            stats["below_threshold"] += 1
+            continue
+
+        ru_row = df_ru.iloc[best_j]
+        pairs.append({
+            "en_id": int(en_row["sentence_id"]),
+            "ru_id": int(ru_row["sentence_id"]),
+            "sim": best_sim,
+            "en_text": en_row["sentence"][:80],
+            "ru_text": ru_row["sentence"][:80],
+        })
+
+    # ── 7. Запись в БД (auto_aligned=2) ──────────────────────────────────────
+    print(f"\n{'[DRY RUN] -- v BD ne pishu' if dry_run else '[DB] Zapisyvayu v BD (auto_aligned=2)...'}")
+    print(f"{'─'*70}")
+
+    for p in pairs:
+        print(f"  sim={p['sim']:.3f} | {p['en_text']}…")
+        print(f"           → {p['ru_text']}…")
+
+        if not dry_run:
+            try:
+                cursor.execute("""
+                    INSERT OR IGNORE INTO alignment
+                        (sentence_ru_id, sentence_en_id, cosine_sim, auto_aligned, verified)
+                    VALUES (?, ?, ?, 2, 0)
+                """, (p["ru_id"], p["en_id"], p["sim"]))
+                stats["inserted"] += 1
+            except Exception as e:
+                print(f"   ⚠️  Ошибка: {e}")
+                stats["skipped"] += 1
+        else:
+            stats["inserted"] += 1
+
+    if not dry_run:
+        conn.commit()
+
+    conn.close()
+
+    total = len(df_en)
+    print(f"\n{'='*60}")
+    print("REZULTAT VTOROGO PROHODA (EN->RU)")
+    print(f"{'='*60}")
+    print(f"   Vsego neprivyazannykh EN: {total}")
+    print(f"   {'Nashlos by' if dry_run else 'Dobavleno'} par:   {stats['inserted']}")
+    print(f"   Nizhe poroga ({threshold}):  {stats['below_threshold']}")
+    if stats["skipped"]:
+        print(f"   Oshibok:          {stats['skipped']}")
+
+    if total > 0:
+        coverage = stats["inserted"] / total * 100
+        print(f"   Pokrytie:        {coverage:.1f}%")
+
+    return stats
+
+
 # ── Показать все доступные пары текст/перевод ─────────────────────────────────
 
 def list_text_pairs(conn) -> pd.DataFrame:
@@ -251,6 +403,7 @@ def main():
     parser.add_argument("--window",    type=float, default=0.12,  help="Ширина позиц. окна 0..1 (по умолч. 0.12)")
     parser.add_argument("--no-window", dest="use_window", action="store_false", help="Отключить позиционный фильтр")
     parser.add_argument("--dry-run",   action="store_true", help="Показать пары, не записывая в БД")
+    parser.add_argument("--reverse",   action="store_true", help="Второй проход: EN→RU для непривязанных предложений")
     parser.set_defaults(use_window=True)
     args = parser.parse_args()
 
@@ -265,26 +418,42 @@ def main():
         print("\n📚 Найденные пары:")
         print(pairs.to_string(index=False))
         conn.close()
+        explicit_threshold = '--threshold' in sys.argv
+        explicit_window    = '--window' in sys.argv
         for _, row in pairs.iterrows():
-            auto_align_sentences(
+            fn = auto_align_reverse if args.reverse else auto_align_sentences
+            fn(
                 ru_text_id=int(row["text_id"]),
                 translation_id=int(row["translation_id"]),
-                threshold=args.threshold,
+                threshold=args.threshold if explicit_threshold else (0.50 if args.reverse else 0.65),
                 use_position_window=args.use_window,
-                window_size=args.window,
+                window_size=args.window if explicit_window else (0.15 if args.reverse else 0.12),
                 dry_run=args.dry_run,
             )
 
     elif args.ru and args.en:
         conn.close()
-        auto_align_sentences(
-            ru_text_id=args.ru,
-            translation_id=args.en,
-            threshold=args.threshold,
-            use_position_window=args.use_window,
-            window_size=args.window,
-            dry_run=args.dry_run,
-        )
+        # Для второго прохода используем мягкие дефолты, если не заданы явно
+        explicit_threshold = '--threshold' in sys.argv
+        explicit_window    = '--window' in sys.argv
+        if args.reverse:
+            auto_align_reverse(
+                ru_text_id=args.ru,
+                translation_id=args.en,
+                threshold=args.threshold if explicit_threshold else 0.50,
+                use_position_window=args.use_window,
+                window_size=args.window if explicit_window else 0.15,
+                dry_run=args.dry_run,
+            )
+        else:
+            auto_align_sentences(
+                ru_text_id=args.ru,
+                translation_id=args.en,
+                threshold=args.threshold,
+                use_position_window=args.use_window,
+                window_size=args.window,
+                dry_run=args.dry_run,
+            )
 
     else:
         # Показываем список пар и просим выбрать

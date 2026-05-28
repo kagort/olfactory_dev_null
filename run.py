@@ -105,6 +105,7 @@ def run_auto_align():
     python run.py auto-align 1 1 --threshold 0.60
     python run.py auto-align 1 1 --no-window
     python run.py auto-align 1 1 --dry-run
+    python run.py auto-align 1 1 --reverse   — 2-й проход: EN→RU для непривязанных
     python run.py auto-align --all           — все пары в БД
     """
     extra = sys.argv[2:]   # всё после "auto-align"
