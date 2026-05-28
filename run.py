@@ -95,8 +95,35 @@ def run_alignment_export():
 
 def run_alignment_import():
     subprocess.run([PYTHON, "src/alignment.py", "--import"])
-    
-    
+
+
+def run_auto_align():
+    """
+    Автовыравнивание через LaBSE.
+
+    python run.py auto-align 1 1             — пара (ru_text_id=1, translation_id=1)
+    python run.py auto-align 1 1 --threshold 0.60
+    python run.py auto-align 1 1 --no-window
+    python run.py auto-align 1 1 --dry-run
+    python run.py auto-align --all           — все пары в БД
+    """
+    extra = sys.argv[2:]   # всё после "auto-align"
+
+    # Позиционные аргументы ru_id и en_id → превращаем в --ru / --en
+    positional = [a for a in extra if not a.startswith("--")]
+    flags      = [a for a in extra if a.startswith("--")]
+
+    cmd = [PYTHON, "src/auto_align.py"]
+    if "--all" in flags:
+        cmd += ["--all"] + [f for f in flags if f != "--all"]
+    elif len(positional) >= 2:
+        cmd += ["--ru", positional[0], "--en", positional[1]] + flags
+    else:
+        cmd += extra   # передаём как есть (например, --help)
+
+    subprocess.run(cmd)
+
+
 def sborka():
     run_db()
     run_migrate()
@@ -126,7 +153,8 @@ def main():
         "list-align": run_alignment_list,
         "export-align": run_alignment_export,
         "import-align": run_alignment_import,
-        
+        "auto-align": run_auto_align,
+
         "sborka": sborka
     }
     
