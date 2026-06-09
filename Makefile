@@ -3,7 +3,7 @@
 
 CURRENT_SCHEMA = shema_v01.sql   # <<-- МЕНЯЙТЕ ЗДЕСЬ ПРИ ОБНОВЛЕНИИ
 
-.PHONY: help db migrate backup reset
+.PHONY: help db migrate backup reset parse
 
 db:
 	@python db/create_db.py $(CURRENT_SCHEMA)
@@ -33,6 +33,10 @@ check-orphans:
 	@python src/ingest.py --check
 
 
+
+parse:
+	@echo "🔍 UD-парсинг концептов (gram_structure)..."
+	@python src/processing.py --parse-only
 
 status:
 	@sqlite3 db/olfactory.db "SELECT name, applied_at FROM migrations;"

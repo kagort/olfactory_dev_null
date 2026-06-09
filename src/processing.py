@@ -19,6 +19,7 @@ from typing import List, Dict, Optional, Tuple
 # # Добавляем корень проекта в путь
 # sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import DB_PATH, OLFACTORY_WORDS
+from grammar import parse_ru, parse_en, parse_to_json
 
 _nlp_cache = {}
 _morph_ru = None
@@ -125,6 +126,8 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
         return None
 
     first = found_smells[0]
+    concept = first['concept_phrase']
+    gram = parse_ru(concept) if language == 'ru' else parse_en(concept)
     return {
         'position': position,
         'sentence': sentence,
@@ -132,7 +135,9 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
         'search_word': first['word'],
         'left_context': first['left_context'],
         'right_context': first['right_context'],
-        'concept_phrase': first['concept_phrase']
+        'concept_phrase': concept,
+        'gram_structure': gram,
+        'gram_json': parse_to_json(gram),
     }
 
 
@@ -173,14 +178,16 @@ def process_all_texts(clear_all: bool = False):
                     INSERT INTO sentences
                     (source_type, text_id, translation_id, language, position,
                      sentence, search_word, left_context, right_context, concept_phrase,
-                     syntax_tree, pos_tags)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     syntax_tree, pos_tags, gram_structure, gram_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     'original', text_id, None, lang, pos,
                     result['sentence'], result['search_word'],
                     result['left_context'], result['right_context'], result['concept_phrase'],
                     None,
-                    json.dumps([w['pos'] for w in result['smell_words']])
+                    json.dumps([w['pos'] for w in result['smell_words']]),
+                    result['gram_structure'],
+                    result['gram_json'],
                 ))
                 found += 1
                 stats['olfactory'] += 1
@@ -208,14 +215,16 @@ def process_all_texts(clear_all: bool = False):
                     INSERT INTO sentences
                     (source_type, text_id, translation_id, language, position,
                      sentence, search_word, left_context, right_context, concept_phrase,
-                     syntax_tree, pos_tags)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     syntax_tree, pos_tags, gram_structure, gram_json)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     'translation', None, trans_id, lang, pos,
                     result['sentence'], result['search_word'],
                     result['left_context'], result['right_context'], result['concept_phrase'],
                     None,
-                    json.dumps([w['pos'] for w in result['smell_words']])
+                    json.dumps([w['pos'] for w in result['smell_words']]),
+                    result['gram_structure'],
+                    result['gram_json'],
                 ))
                 found += 1
                 stats['olfactory'] += 1
@@ -239,6 +248,36 @@ def process_all_texts(clear_all: bool = False):
         print(f"   Процент: {percent:.1f}%")
 
 
+def parse_gram_structures():
+    """Пересчитывает gram_structure и gram_json для всех предложений в БД."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("SELECT sentence_id, language, concept_phrase FROM sentences WHERE concept_phrase IS NOT NULL")
+    rows = cursor.fetchall()
+    print(f"\n🔍 UD-парсинг {len(rows)} предложений...")
+
+    updated = 0
+    for sentence_id, lang, concept in rows:
+        try:
+            gram = parse_ru(concept) if lang == 'ru' else parse_en(concept)
+            gram_j = parse_to_json(gram)
+            cursor.execute(
+                "UPDATE sentences SET gram_structure = ?, gram_json = ? WHERE sentence_id = ?",
+                (gram, gram_j, sentence_id)
+            )
+            updated += 1
+        except Exception as e:
+            print(f"   ⚠️  sentence_id={sentence_id}: {e}")
+
+    conn.commit()
+    conn.close()
+    print(f"   ✅ Обновлено: {updated} из {len(rows)}")
+
+
 if __name__ == "__main__":
-    clear = '--clear' in sys.argv
-    process_all_texts(clear_all=clear)
+    if '--parse-only' in sys.argv:
+        parse_gram_structures()
+    else:
+        clear = '--clear' in sys.argv
+        process_all_texts(clear_all=clear)
