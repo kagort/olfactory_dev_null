@@ -1,7 +1,7 @@
 # src/processing.py
 """
 Поиск ольфакторных предложений в текстах и переводах
-Запуск: 
+Запуск:
     python src/processing.py
     python src/processing.py --clear
 """
@@ -11,6 +11,7 @@ import sqlite3
 import re
 import syntok.segmenter as segmenter
 import spacy
+import pymorphy3
 import json
 from pathlib import Path
 from typing import List, Dict, Optional, Tuple
@@ -20,6 +21,19 @@ from typing import List, Dict, Optional, Tuple
 from config import DB_PATH, OLFACTORY_WORDS
 
 _nlp_cache = {}
+_morph_ru = None
+
+
+def get_morph_ru() -> pymorphy3.MorphAnalyzer:
+    global _morph_ru
+    if _morph_ru is None:
+        _morph_ru = pymorphy3.MorphAnalyzer()
+    return _morph_ru
+
+
+def lemmatize_ru(word: str) -> str:
+    """Возвращает нормальную форму русского слова через pymorphy3."""
+    return get_morph_ru().parse(word)[0].normal_form
 
 
 def get_nlp_model(language: str):
@@ -46,15 +60,23 @@ def extract_context(words: List[str], word_pos: int, window: int = 3) -> Tuple[s
     """Извлекает контекст"""
     left_start = max(0, word_pos - window)
     left_context = ' '.join(words[left_start:word_pos])
-    
+
     right_end = min(len(words), word_pos + window + 1)
     right_context = ' '.join(words[word_pos + 1:right_end])
-    
+
     concept_start = max(0, word_pos - 2)
     concept_end = min(len(words), word_pos + 3)
     concept_phrase = ' '.join(words[concept_start:concept_end])
-    
+
     return left_context, right_context, concept_phrase
+
+
+def _has_smell_word_ru(sentence: str, smell_words: set) -> bool:
+    """Быстрая предпроверка для русского: лемматизирует каждый токен через pymorphy3."""
+    for raw_word in re.findall(r'[а-яёА-ЯЁ]+', sentence.lower()):
+        if lemmatize_ru(raw_word) in smell_words or raw_word in smell_words:
+            return True
+    return False
 
 
 def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Dict]:
@@ -62,17 +84,33 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
     smell_words = OLFACTORY_WORDS.get(language, set())
     if not smell_words:
         return None
-    
-    if not any(word in sentence.lower() for word in smell_words):
-        return None
-    
+
+    # Предпроверка: для русского используем pymorphy3, для остальных — подстрока
+    if language == 'ru':
+        if not _has_smell_word_ru(sentence, smell_words):
+            return None
+    else:
+        if not any(word in sentence.lower() for word in smell_words):
+            return None
+
     nlp = get_nlp_model(language)
     doc = nlp(sentence)
     words = sentence.split()
-    
+
     found_smells = []
     for token in doc:
-        if token.lemma_.lower() in smell_words or token.text.lower() in smell_words:
+        # Для русского добавляем pymorphy3-лемму как третий источник
+        if language == 'ru':
+            morph_lemma = lemmatize_ru(token.text.lower())
+            match = (
+                morph_lemma in smell_words
+                or token.lemma_.lower() in smell_words
+                or token.text.lower() in smell_words
+            )
+        else:
+            match = token.lemma_.lower() in smell_words or token.text.lower() in smell_words
+
+        if match:
             left, right, concept = extract_context(words, token.i)
             found_smells.append({
                 'word': token.text,
@@ -82,10 +120,10 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
                 'right_context': right,
                 'concept_phrase': concept
             })
-    
+
     if not found_smells:
         return None
-    
+
     first = found_smells[0]
     return {
         'position': position,
@@ -100,40 +138,40 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
 
 def process_all_texts(clear_all: bool = False):
     """Обрабатывает все тексты и переводы"""
-    
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
+
     if clear_all:
         cursor.execute("DELETE FROM sentences")
         conn.commit()
         print("🗑️ Таблица sentences полностью очищена")
-    
+
     stats = {
         'total': 0,
         'olfactory': 0,
         'originals': 0,
         'translations': 0
     }
-    
+
     # 1. Обработка оригиналов
     print("\n📖 Обработка оригиналов...")
     cursor.execute("SELECT text_id, title, language, content FROM texts WHERE content IS NOT NULL")
-    
+
     for text_id, title, lang, content in cursor.fetchall():
         print(f"   📕 {title} ({lang})")
         stats['originals'] += 1
-        
+
         sentences = split_sentences(content)
         stats['total'] += len(sentences)
-        
+
         found = 0
         for pos, sentence in enumerate(sentences, 1):
             result = analyze_sentence(sentence, pos, lang)
             if result:
                 cursor.execute("""
-                    INSERT INTO sentences 
-                    (source_type, text_id, translation_id, language, position, 
+                    INSERT INTO sentences
+                    (source_type, text_id, translation_id, language, position,
                      sentence, search_word, left_context, right_context, concept_phrase,
                      syntax_tree, pos_tags)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -146,29 +184,29 @@ def process_all_texts(clear_all: bool = False):
                 ))
                 found += 1
                 stats['olfactory'] += 1
-        
+
         if found:
             print(f"      🔍 Найдено: {found}")
         conn.commit()
-    
+
     # 2. Обработка переводов
     print("\n📖 Обработка переводов...")
     cursor.execute("SELECT translation_id, title, language, content FROM translations WHERE content IS NOT NULL")
-    
+
     for trans_id, title, lang, content in cursor.fetchall():
         print(f"   📘 {title} ({lang})")
         stats['translations'] += 1
-        
+
         sentences = split_sentences(content)
         stats['total'] += len(sentences)
-        
+
         found = 0
         for pos, sentence in enumerate(sentences, 1):
             result = analyze_sentence(sentence, pos, lang)
             if result:
                 cursor.execute("""
-                    INSERT INTO sentences 
-                    (source_type, text_id, translation_id, language, position, 
+                    INSERT INTO sentences
+                    (source_type, text_id, translation_id, language, position,
                      sentence, search_word, left_context, right_context, concept_phrase,
                      syntax_tree, pos_tags)
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -181,13 +219,13 @@ def process_all_texts(clear_all: bool = False):
                 ))
                 found += 1
                 stats['olfactory'] += 1
-        
+
         if found:
             print(f"      🔍 Найдено: {found}")
         conn.commit()
-    
+
     conn.close()
-    
+
     print("\n" + "="*60)
     print("📊 РЕЗУЛЬТАТЫ ОБРАБОТКИ")
     print("="*60)
@@ -195,7 +233,7 @@ def process_all_texts(clear_all: bool = False):
     print(f"   Обработано переводов: {stats['translations']}")
     print(f"   Всего предложений: {stats['total']}")
     print(f"   Ольфакторных предложений: {stats['olfactory']}")
-    
+
     if stats['total']:
         percent = stats['olfactory'] / stats['total'] * 100
         print(f"   Процент: {percent:.1f}%")
