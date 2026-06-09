@@ -3,13 +3,32 @@
 UD-парсинг ольфакторных концептов.
 
 Функции:
-    parse_ru(text) -> str   — Stanza (ru_syntagrus)
-    parse_en(text) -> str   — spaCy (en_core_web_sm)
+    parse_ru(text) -> str        — Stanza (ru_syntagrus), строковый формат
+    parse_en(text) -> str        — spaCy (en_core_web_sm), строковый формат
+    to_gram_json(gram_str) -> dict  — структурированные признаки из gram_structure
 
-Формат вывода:
+Формат gram_structure:
     ROOT[UPOS](лемма) + deprel(форма/UPOS) + deprel(форма/UPOS > [inner...])
+
+Формат gram_json:
+    {
+        "root_pos":   "VERB",
+        "root_lemma": "пахнуть",
+        "deprels":    ["nsubj", "obl"],
+        "has_nsubj":  true,
+        "has_obj":    false,
+        "has_obl":    true,
+        "has_nmod":   false,
+        "has_amod":   false,
+        "has_acl":    false,
+        "has_advmod": false,
+        "has_conj":   false,
+        "has_prep_of": false,
+        "depth_gte2": false
+    }
 """
 
+import json
 import re
 import spacy
 import stanza
@@ -141,3 +160,62 @@ def parse_en(text: str, max_depth: int = 2) -> str:
         return (base + " + " + " + ".join(parts)) if parts else base
 
     return subtree(root_tok) or text
+
+
+# ── Извлечение структурированных признаков ────────────────────────────────────
+
+_RE_ROOT = re.compile(r"ROOT\[([A-Z]+)\]\(([^)]+)\)")
+_RE_DEPREL = re.compile(r"\b([a-z_]+)\(")
+
+
+def to_gram_json(gram_str: str) -> dict:
+    """
+    Преобразует строку gram_structure в структурированный словарь признаков.
+
+    Пример входа:
+        "ROOT[VERB](пахнуть) + nsubj(запах/NOUN) + obl(комнате/NOUN > [case(в/ADP)])"
+
+    Пример выхода:
+        {"root_pos": "VERB", "root_lemma": "пахнуть", "deprels": ["nsubj", "obl", "case"],
+         "has_nsubj": true, "has_obj": false, ...}
+    """
+    empty = {
+        "root_pos": None, "root_lemma": None, "deprels": [],
+        "has_nsubj": False, "has_obj": False, "has_obl": False,
+        "has_nmod": False, "has_amod": False, "has_acl": False,
+        "has_advmod": False, "has_conj": False, "has_prep_of": False,
+        "depth_gte2": False,
+    }
+
+    if not gram_str or str(gram_str).strip() in ("", "nan"):
+        return empty
+
+    s = str(gram_str)
+
+    root_m = _RE_ROOT.search(s)
+    root_pos = root_m.group(1) if root_m else None
+    root_lemma = root_m.group(2) if root_m else None
+
+    # Все deprel-метки в строке (кроме ROOT)
+    deprels = [d for d in _RE_DEPREL.findall(s) if d.upper() != "ROOT"]
+
+    return {
+        "root_pos":    root_pos,
+        "root_lemma":  root_lemma,
+        "deprels":     deprels,
+        "has_nsubj":   "nsubj"  in deprels,
+        "has_obj":     "obj"    in deprels,
+        "has_obl":     "obl"    in deprels,
+        "has_nmod":    "nmod"   in deprels,
+        "has_amod":    "amod"   in deprels,
+        "has_acl":     "acl"    in deprels,
+        "has_advmod":  "advmod" in deprels,
+        "has_conj":    "conj"   in deprels,
+        "has_prep_of": bool(re.search(r"prep\(of", s)),
+        "depth_gte2":  s.count(">") >= 1,
+    }
+
+
+def parse_to_json(gram_str: str) -> str:
+    """Обёртка: возвращает to_gram_json как JSON-строку для записи в БД."""
+    return json.dumps(to_gram_json(gram_str), ensure_ascii=False)
