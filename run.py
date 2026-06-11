@@ -97,6 +97,16 @@ def run_alignment_import():
     subprocess.run([PYTHON, "src/alignment.py", "--import"])
 
 
+def run_add_book():
+    """
+    python run.py add-book --ru FILE --en FILE [--meta key=val ...]
+    python run.py add-book --ru tolstoy_ru.txt --en tolstoy_en.txt \\
+        --meta author=Толстой title="Война и мир" year=1869
+    """
+    extra = sys.argv[2:]  # всё после "add-book"
+    subprocess.run([PYTHON, "src/add_book.py"] + extra)
+
+
 def run_auto_align():
     """
     Автовыравнивание через LaBSE.
@@ -155,6 +165,7 @@ def main():
         "export-align": run_alignment_export,
         "import-align": run_alignment_import,
         "auto-align": run_auto_align,
+        "add-book": run_add_book,
 
         "sborka": sborka
     }
