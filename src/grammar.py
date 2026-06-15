@@ -47,13 +47,23 @@ def _get_nlp_en():
 def _get_nlp_ru():
     global _nlp_ru
     if _nlp_ru is None:
-        _nlp_ru = stanza.Pipeline(
-            lang="ru",
-            processors="tokenize,pos,lemma,depparse",
-            tokenize_no_ssplit=True,
-            verbose=False,
-            download_method=stanza.DownloadMethod.REUSE_RESOURCES,
-        )
+        import os
+        # stanza всегда скачивает resources.json при инициализации, даже с REUSE_RESOURCES.
+        # Убираем прокси-переменные, чтобы requests не пытался идти через SOCKS.
+        _proxy_vars = {k: os.environ.pop(k) for k in
+                       ['ALL_PROXY', 'all_proxy', 'HTTPS_PROXY', 'https_proxy',
+                        'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy']
+                       if k in os.environ}
+        try:
+            _nlp_ru = stanza.Pipeline(
+                lang="ru",
+                processors="tokenize,pos,lemma,depparse",
+                tokenize_no_ssplit=True,
+                verbose=False,
+                download_method=stanza.DownloadMethod.REUSE_RESOURCES,
+            )
+        finally:
+            os.environ.update(_proxy_vars)
     return _nlp_ru
 
 
