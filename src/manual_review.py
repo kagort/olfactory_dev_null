@@ -140,10 +140,13 @@ def review_unmatched(ru_text_id: int, translation_id: int, top_k: int = 3):
     _get_translator()
 
     model = get_model()
-    print("\n🔢 Кодирую предложения через LaBSE...")
+    print("\n🔢 Кодирую RU предложения через LaBSE...")
     ru_vecs = model.encode(df_ru["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
-    en_vecs = model.encode(df_en["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
-    sim_matrix = _cosine_matrix(ru_vecs, en_vecs)
+
+    print("\n🔄 Перевожу EN→RU и кодирую переводы через LaBSE...")
+    translations = [translate_en_ru(s) for s in df_en["sentence"].tolist()]
+    tr_vecs = model.encode(translations, show_progress_bar=True, convert_to_numpy=True)
+    sim_matrix = _cosine_matrix(ru_vecs, tr_vecs)
 
     cursor = conn.cursor()
     stats = {'confirmed': 0, 'skipped': 0}
@@ -155,8 +158,8 @@ def review_unmatched(ru_text_id: int, translation_id: int, top_k: int = 3):
 
     for j, en_row in df_en.iterrows():
         en_text    = en_row['sentence']
+        translated = translations[j]
         col_sim    = sim_matrix[:, j]
-        translated = translate_en_ru(en_text)
 
         lex_scores = np.array([
             word_overlap(translated, df_ru.iloc[i]['sentence'])
