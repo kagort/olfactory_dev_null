@@ -143,8 +143,13 @@ def review_unmatched(ru_text_id: int, translation_id: int, top_k: int = 3):
     print("\n🔢 Кодирую RU предложения через LaBSE...")
     ru_vecs = model.encode(df_ru["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
 
-    print("\n🔄 Перевожу EN→RU и кодирую переводы через LaBSE...")
-    translations = [translate_en_ru(s) for s in df_en["sentence"].tolist()]
+    print("\n🔄 Перевожу EN→RU...")
+    translations = []
+    total = len(df_en)
+    for i, s in enumerate(df_en["sentence"].tolist(), 1):
+        translations.append(translate_en_ru(s))
+        print(f"  {i}/{total}", end="\r", flush=True)
+    print()
     tr_vecs = model.encode(translations, show_progress_bar=True, convert_to_numpy=True)
     sim_matrix = _cosine_matrix(ru_vecs, tr_vecs)
 
