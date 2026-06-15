@@ -2,17 +2,15 @@
 """
 Интерактивная проверка непривязанных EN-предложений.
 
-Алгоритм поиска кандидатов (гибридный):
-  1. Позиционное окно: offset = median(en_pos - ru_pos) по выровненным парам,
-     поиск только в диапазоне [en_pos - offset ± tolerance].
-  2. Перевод EN→RU (Helsinki-NLP/opus-mt-en-ru, загружается из локального кэша).
-  3. Гибридный скор = 0.5 × cosine_sim + 0.5 × word_overlap(перевод, RU).
-  4. Показывает топ-K кандидатов. Пользователь подтверждает или пропускает.
+Алгоритм:
+  1. Перевод EN→RU (Helsinki-NLP/opus-mt-en-ru, локальная папка C:\models\opus-mt-en-ru).
+  2. Гибридный скор = 0.5 × cosine_sim(LaBSE) + 0.5 × word_overlap(перевод, RU).
+  3. Показывает топ-K кандидатов по всему тексту.
+  4. Пользователь подтверждает, пропускает или ищет по ключевому слову (f).
 
 Запуск:
     python src/manual_review.py --ru 1 --en 1
-    python src/manual_review.py --ru 1 --en 1 --top 5 --tolerance 300
-    python src/manual_review.py --ru 1 --en 1 --no-window
+    python src/manual_review.py --ru 1 --en 1 --top 5
 """
 
 import sqlite3
@@ -63,7 +61,6 @@ _STOP_RU = {'и', 'в', 'не', 'на', 'с', 'что', 'а', 'это', 'из', 
             'то', 'уже', 'всё', 'так', 'же', 'был', 'была', 'были', 'есть', 'за'}
 
 def word_overlap(translated: str, candidate: str) -> float:
-    """Доля слов перевода, найденных в кандидате (по значимым токенам)."""
     def tokens(s):
         return {w.strip('.,!?;:—–()«»"\'') for w in s.lower().split()
                 if len(w) > 2 and w not in _STOP_RU}
@@ -74,32 +71,41 @@ def word_overlap(translated: str, candidate: str) -> float:
     return len(t & c) / len(t)
 
 
-# ── Расчёт смещения ───────────────────────────────────────────────────────────
+# ── Поиск по ключевому слову ─────────────────────────────────────────────────
 
-def _compute_offset(conn, ru_text_id: int, translation_id: int):
-    df = pd.read_sql_query(f"""
-        SELECT se.position AS en_pos, sr.position AS ru_pos
-        FROM alignment a
-        JOIN sentences sr ON sr.sentence_id = a.sentence_ru_id
-        JOIN sentences se ON se.sentence_id = a.sentence_en_id
-        WHERE sr.text_id = {ru_text_id}
-          AND se.translation_id = {translation_id}
-    """, conn)
-    if df.empty:
-        return None, None
-    offsets = df['en_pos'] - df['ru_pos']
-    return float(np.median(offsets)), float(np.std(offsets))
+def find_by_keyword(df_ru: pd.DataFrame, keyword: str) -> None:
+    kw = keyword.lower()
+    matches = df_ru[df_ru['sentence'].str.lower().str.contains(kw, na=False)]
+    if matches.empty:
+        print(f"  ❌ Ничего не найдено по слову «{keyword}»")
+        return
+    print(f"  🔍 Найдено {len(matches)} предложений:")
+    for _, row in matches.iterrows():
+        print(f"    pos={row['position']}  id={row['sentence_id']}")
+        print(f"    \"{row['sentence'][:120]}\"")
+    print()
+
+
+# ── Сохранение пары ──────────────────────────────────────────────────────────
+
+def _save_pair(cursor, ru_id: int, en_id: int, sim: float, stats: dict) -> None:
+    existing = cursor.execute(
+        "SELECT alignment_id FROM alignment WHERE sentence_ru_id=? AND sentence_en_id=?",
+        (ru_id, en_id)).fetchone()
+    if existing:
+        print("  ℹ️  Эта пара уже есть в БД.\n")
+    else:
+        cursor.execute(
+            "INSERT INTO alignment (sentence_ru_id, sentence_en_id, cosine_sim, auto_aligned)"
+            " VALUES (?,?,?,0)",
+            (ru_id, en_id, round(sim, 4)))
+        stats['confirmed'] += 1
+        print(f"  ✅ Сохранено (sim={sim:.3f})\n")
 
 
 # ── Основная функция ──────────────────────────────────────────────────────────
 
-def review_unmatched(
-    ru_text_id: int,
-    translation_id: int,
-    top_k: int = 3,
-    use_position_window: bool = True,
-    tolerance: int = 200,
-):
+def review_unmatched(ru_text_id: int, translation_id: int, top_k: int = 3):
     conn = sqlite3.connect(DB_PATH)
 
     df_ru = pd.read_sql_query(f"""
@@ -130,13 +136,8 @@ def review_unmatched(
         conn.close()
         return
 
-    offset, offset_std = _compute_offset(conn, ru_text_id, translation_id)
-    if use_position_window and offset is not None:
-        print(f"\n📐 Смещение EN−RU: {offset:+.0f} предл. (σ={offset_std:.0f})")
-        print(f"   Окно поиска: offset ± {tolerance} предл.")
-    elif use_position_window:
-        print("\n⚠️  Нет выровненных пар — поиск по всему тексту.")
-        use_position_window = False
+    print("\n🔤 Загружаю переводчик...")
+    _get_translator()
 
     model = get_model()
     print("\n🔢 Кодирую предложения через LaBSE...")
@@ -144,40 +145,21 @@ def review_unmatched(
     en_vecs = model.encode(df_en["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
     sim_matrix = _cosine_matrix(ru_vecs, en_vecs)
 
-    if use_position_window and offset is not None:
-        ru_pos      = df_ru["position"].values
-        en_pos      = df_en["position"].values
-        expected_ru = en_pos - offset
-        pos_diff    = np.abs(ru_pos[:, None] - expected_ru[None, :])
-        in_window   = pos_diff <= tolerance
-    else:
-        in_window = np.ones((len(df_ru), len(df_en)), dtype=bool)
-
-    # Загружаем переводчик один раз
-    print("\n🔤 Загружаю переводчик...")
-    _get_translator()
-
     cursor = conn.cursor()
     stats = {'confirmed': 0, 'skipped': 0}
 
     print(f"\n{'='*70}")
     print(f"📝 РУЧНАЯ РАЗМЕТКА — {len(df_en)} предложений")
-    print(f"   Управление: 1-{top_k} — принять | s — пропустить | q — выйти")
+    print(f"   Управление: 1-{top_k} — принять | f — найти по слову | s — пропустить | q — выйти")
     print(f"{'='*70}\n")
 
     for j, en_row in df_en.iterrows():
-        en_text      = en_row['sentence']
-        window_mask  = in_window[:, j]
-        if not window_mask.any():
-            window_mask = np.ones(len(df_ru), dtype=bool)
-
-        col_sim = sim_matrix[:, j].copy()
-        col_sim[~window_mask] = 0.0
-
+        en_text    = en_row['sentence']
+        col_sim    = sim_matrix[:, j]
         translated = translate_en_ru(en_text)
 
         lex_scores = np.array([
-            word_overlap(translated, df_ru.iloc[i]['sentence']) if window_mask[i] else 0.0
+            word_overlap(translated, df_ru.iloc[i]['sentence'])
             for i in range(len(df_ru))
         ])
 
@@ -191,45 +173,50 @@ def review_unmatched(
 
         candidates = []
         for rank, ru_i in enumerate(top_indices, 1):
-            ru_row  = df_ru.iloc[ru_i]
-            h       = float(hybrid[ru_i])
-            c       = float(col_sim[ru_i])
-            l       = float(lex_scores[ru_i])
+            ru_row = df_ru.iloc[ru_i]
+            h = float(hybrid[ru_i])
+            c = float(col_sim[ru_i])
+            l = float(lex_scores[ru_i])
             candidates.append((ru_row, c))
             print(f"  [{rank}] hybrid={h:.3f}  (sim={c:.3f} + lex={l:.3f})  pos={ru_row['position']}")
             print(f"       \"{ru_row['sentence'][:120]}\"")
         print()
 
         while True:
-            choice = input(f"  Выбор (1-{top_k} / s=пропустить / q=выйти): ").strip().lower()
+            choice = input(f"  Выбор (1-{top_k} / f=поиск / s=пропустить / q=выйти): ").strip().lower()
+
             if choice == 'q':
                 conn.commit()
                 conn.close()
                 print(f"\n✅ Прервано. Подтверждено: {stats['confirmed']}, пропущено: {stats['skipped']}")
                 return
+
             if choice == 's':
                 stats['skipped'] += 1
                 break
+
+            if choice == 'f':
+                kw = input("  Ключевое слово: ").strip()
+                find_by_keyword(df_ru, kw)
+                # После поиска спрашиваем: ввести sentence_id вручную?
+                sid = input("  Ввести sentence_id для сохранения (или Enter чтобы продолжить): ").strip()
+                if sid.isdigit():
+                    ru_id = int(sid)
+                    row = df_ru[df_ru['sentence_id'] == ru_id]
+                    if row.empty:
+                        print("  ❌ sentence_id не найден.")
+                    else:
+                        sim = float(col_sim[row.index[0]])
+                        _save_pair(cursor, ru_id, int(en_row['sentence_id']), sim, stats)
+                        break
+                continue
+
             if choice.isdigit() and 1 <= int(choice) <= len(candidates):
-                idx   = int(choice) - 1
+                idx = int(choice) - 1
                 ru_row, sim = candidates[idx]
-                ru_id = int(ru_row['sentence_id'])
-                en_id = int(en_row['sentence_id'])
-
-                existing = cursor.execute(
-                    "SELECT alignment_id FROM alignment WHERE sentence_ru_id=? AND sentence_en_id=?",
-                    (ru_id, en_id)).fetchone()
-
-                if existing:
-                    print("  ℹ️  Эта пара уже есть в БД.\n")
-                else:
-                    cursor.execute(
-                        "INSERT INTO alignment (sentence_ru_id, sentence_en_id, cosine_sim, auto_aligned)"
-                        " VALUES (?,?,?,0)",
-                        (ru_id, en_id, round(sim, 4)))
-                    stats['confirmed'] += 1
-                    print(f"  ✅ Сохранено (sim={sim:.3f})\n")
+                _save_pair(cursor, int(ru_row['sentence_id']), int(en_row['sentence_id']), sim, stats)
                 break
+
             print("  ❌ Неверный ввод.")
 
         print('-' * 70)
@@ -243,19 +230,15 @@ def review_unmatched(
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ru',        type=int, required=True)
-    parser.add_argument('--en',        type=int, required=True)
-    parser.add_argument('--top',       type=int, default=3)
-    parser.add_argument('--tolerance', type=int, default=200)
-    parser.add_argument('--no-window', action='store_true')
+    parser.add_argument('--ru',  type=int, required=True)
+    parser.add_argument('--en',  type=int, required=True)
+    parser.add_argument('--top', type=int, default=3)
     args = parser.parse_args()
 
     review_unmatched(
         ru_text_id=args.ru,
         translation_id=args.en,
         top_k=args.top,
-        use_position_window=not args.no_window,
-        tolerance=args.tolerance,
     )
 
 
