@@ -127,7 +127,10 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
 
     first = found_smells[0]
     concept = first['concept_phrase']
-    gram = parse_ru(concept) if language == 'ru' else parse_en(concept)
+    try:
+        gram = parse_ru(concept) if language == 'ru' else parse_en(concept)
+    except Exception:
+        gram = None
     return {
         'position': position,
         'sentence': sentence,
