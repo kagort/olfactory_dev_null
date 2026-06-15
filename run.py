@@ -6,20 +6,20 @@
     python run.py migrate         # применить миграции
     python run.py backup          # бекап БД
     python run.py reset           # полный сброс
-    
+
     python run.py ingest          # загрузить книги из CSV
     python run.py link            # связать переводы
     python run.py check           # проверить несвязанные переводы
-    
+
     python run.py detect          # найти ольфакторные предложения (без очистки)
     python run.py detect --clear   # найти ольфакторные предложения (с очисткой)
-    
+
     python run.py list-align
     python run.py export-align
     python run.py import-align
-    
+
     python run.py jupyter         # запустить Jupyter
-    
+
     python run.py sborka
 """
 
@@ -69,10 +69,10 @@ def run_reset():
 def run_detect():
     """python run.py detect          — без очистки
        python run.py detect --clear — с очисткой"""
-    
+
     # Проверяем, есть ли флаг --clear
     clear_flag = '--clear' in sys.argv
-    
+
     print("🔍 Поиск ольфакторных предложений...")
     if clear_flag:
         print("   ⚠️ Режим очистки: старые данные будут удалены")
@@ -99,18 +99,12 @@ def run_alignment_import():
 
 def run_review():
     """
-    python run.py review 1 1          — ручная разметка непривязанных EN
-    python run.py review 1 1 --top 5  — показывать топ-5 кандидатов
-    python run.py review 1 1 --no-window
+    python run.py review --ru 1 --en 1           — ручная разметка v2 (по сырому тексту)
+    python run.py review --ru 1 --en 1 --top 5   — показывать топ-5 кандидатов
+    python run.py review --ru 1 --en 1 --parse   — разбирать грамматику новых предложений
     """
     extra = sys.argv[2:]
-    positional = [a for a in extra if not a.startswith("--")]
-    flags      = [a for a in extra if a.startswith("--")]
-    cmd = [PYTHON, "src/manual_review.py"]
-    if len(positional) >= 2:
-        cmd += ["--ru", positional[0], "--en", positional[1]] + flags
-    else:
-        cmd += extra
+    cmd = [PYTHON, "src/manual_review_v2.py"] + extra
     subprocess.run(cmd)
 
 
@@ -158,11 +152,11 @@ def sborka():
     run_ingest()
     run_link()
     run_detect()
-    
+
     run_alignment_list()
     ru_id = input("Введите ru_text_id (например, 1): ").strip()
     en_id = input("Введите translation_id (например, 1): ").strip()
-    
+
     if ru_id and en_id:
         subprocess.run([PYTHON, "src/alignment.py", "--export", "--ru", ru_id, "--en", en_id])
     else:
@@ -187,13 +181,13 @@ def main():
 
         "sborka": sborka
     }
-    
+
     if len(sys.argv) < 2:
         print("Доступные команды:")
         for cmd in commands:
             print(f"  python run.py {cmd}")
         return
-    
+
     cmd = sys.argv[1]
     if cmd in commands:
         commands[cmd]()
