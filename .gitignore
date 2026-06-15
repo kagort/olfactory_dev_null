@@ -17,3 +17,6 @@ other/
 # Virtual environment
 venv/
 .venv/
+
+# Результаты — локальные файлы разметки
+results/
