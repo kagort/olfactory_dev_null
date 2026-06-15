@@ -123,10 +123,14 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
     ru_id_to_num = dict(zip(df_ru['ru_id'], df_ru['№']))
     en_id_to_num = dict(zip(df_en['en_id'], df_en['№']))
 
-    # ── 4. Сводка по RU: сколько EN уже привязано ────────────────────────────
+    # ── 4. Сводка по RU: сколько EN уже привязано и какие именно ────────────
     en_count = df_align.groupby('ru_id')['en_id'].count().rename('кол-во EN')
-    df_ru = df_ru.join(en_count, on='ru_id')
+    en_nums  = df_align.groupby('ru_id')['en_id'].apply(
+        lambda ids: ', '.join(str(en_id_to_num[i]) for i in ids if i in en_id_to_num)
+    ).rename('EN №')
+    df_ru = df_ru.join(en_count, on='ru_id').join(en_nums, on='ru_id')
     df_ru['кол-во EN'] = df_ru['кол-во EN'].fillna(0).astype(int)
+    df_ru['EN №']      = df_ru['EN №'].fillna('')
 
     # ── 5. В EN-листе: ru_№, cosine_sim, авто ────────────────────────────────
     en_info = df_align.copy()
@@ -159,7 +163,7 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
         df_en[['№', 'en_id', 'position', 'sentence', 'ru_№', 'sim', 'авто']].to_excel(
             writer, sheet_name='Английские', index=False)
         # Лист «Русские» — справочник
-        df_ru[['№', 'ru_id', 'position', 'sentence', 'кол-во EN']].to_excel(
+        df_ru[['№', 'ru_id', 'position', 'sentence', 'кол-во EN', 'EN №']].to_excel(
             writer, sheet_name='Русские', index=False)
 
     # ── 7. Форматирование ─────────────────────────────────────────────────────
