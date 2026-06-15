@@ -40,5 +40,9 @@ add-book:
 	@echo "📚 Добавление книги..."
 	@python run.py add-book $(ARGS)
 
+add-book:
+	@echo "📚 Добавление книги..."
+	@python run.py add-book $(ARGS)
+
 status:
 	@sqlite3 db/olfactory.db "SELECT name, applied_at FROM migrations;"

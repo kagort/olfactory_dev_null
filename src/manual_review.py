@@ -5,7 +5,7 @@
 Алгоритм поиска кандидатов (гибридный):
   1. Позиционное окно: offset = median(en_pos - ru_pos) по выровненным парам,
      поиск только в диапазоне [en_pos - offset ± tolerance].
-  2. Перевод EN→RU (Helsinki-NLP/opus-mt-en-ru).
+  2. Перевод EN→RU (Helsinki-NLP/opus-mt-en-ru, загружается из локального кэша).
   3. Гибридный скор = 0.5 × cosine_sim + 0.5 × word_overlap(перевод, RU).
   4. Показывает топ-K кандидатов. Пользователь подтверждает или пропускает.
 
@@ -23,85 +23,46 @@ import pandas as pd
 from config import DB_PATH
 from auto_align import get_model, _cosine_matrix
 
-# ── Лексический скоринг без перевода ─────────────────────────────────────────
-# Простая транслитерация EN→RU для имён собственных и ключевых слов
+# ── Перевод EN→RU ─────────────────────────────────────────────────────────────
 
-_TRANSLIT = str.maketrans(
-    'abcdefghijklmnopqrstuvwxyz',
-    'абцдефгхийклмнопqрстуввхыз'
-)
+_translator = None
+_tok = None
 
-_TRANSLIT_MAP = {
-    'a': 'а', 'b': 'б', 'c': 'к', 'd': 'д', 'e': 'е', 'f': 'ф',
-    'g': 'г', 'h': 'х', 'i': 'и', 'j': 'й', 'k': 'к', 'l': 'л',
-    'm': 'м', 'n': 'н', 'o': 'о', 'p': 'п', 'q': 'к', 'r': 'р',
-    's': 'с', 't': 'т', 'u': 'у', 'v': 'в', 'w': 'в', 'x': 'кс',
-    'y': 'й', 'z': 'з',
-    'ch': 'ч', 'sh': 'ш', 'th': 'з', 'ph': 'ф', 'zh': 'ж',
-}
-
-_STOP_EN = {'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'of',
-            'is', 'was', 'were', 'it', 'he', 'she', 'they', 'we', 'i',
-            'that', 'this', 'with', 'from', 'by', 'for', 'as', 'but'}
-_STOP_RU = {'и', 'в', 'не', 'на', 'с', 'что', 'а', 'это', 'из', 'по', 'к',
-            'но', 'он', 'она', 'они', 'мы', 'вы', 'я', 'его', 'её', 'их',
-            'как', 'или', 'то', 'уже', 'всё', 'так', 'же', 'был', 'была',
-            'были', 'есть', 'за', 'со', 'ещё', 'тут', 'там'}
+def _get_translator():
+    global _translator, _tok
+    if _translator is None:
+        from transformers import MarianMTModel, MarianTokenizer
+        model_name = "Helsinki-NLP/opus-mt-en-ru"
+        print(f"🔄 Загружаю переводчик {model_name}...")
+        _tok        = MarianTokenizer.from_pretrained(model_name, local_files_only=True)
+        _translator = MarianMTModel.from_pretrained(model_name, local_files_only=True)
+        print("✅ Переводчик загружен")
+    return _translator, _tok
 
 
-def _transliterate(word: str) -> str:
-    """Простая транслитерация английского слова в кириллицу."""
-    word = word.lower()
-    result = ''
-    i = 0
-    while i < len(word):
-        pair = word[i:i+2]
-        if pair in _TRANSLIT_MAP:
-            result += _TRANSLIT_MAP[pair]
-            i += 2
-        elif word[i] in _TRANSLIT_MAP:
-            result += _TRANSLIT_MAP[word[i]]
-            i += 1
-        else:
-            i += 1
-    return result
+def translate_en_ru(text: str) -> str:
+    model, tok = _get_translator()
+    inputs = tok([text], return_tensors="pt", padding=True, truncation=True, max_length=512)
+    tokens = model.generate(**inputs)
+    return tok.decode(tokens[0], skip_special_tokens=True)
 
 
-def _key_words_en(text: str):
-    """Извлекает ключевые слова EN: имена собственные + существительные длиннее 4 букв."""
-    words = text.split()
-    result = set()
-    for i, w in enumerate(words):
-        clean = w.strip('.,!?;:—–()«»"\'').lower()
-        if clean in _STOP_EN or len(clean) < 3:
-            continue
-        # Имя собственное — заглавная буква не в начале предложения
-        if i > 0 and w[0].isupper():
-            result.add(_transliterate(clean))
-        # Длинные содержательные слова
-        elif len(clean) > 4:
-            result.add(_transliterate(clean))
-    return result
+# ── Лексический скоринг ───────────────────────────────────────────────────────
 
+_STOP_RU = {'и', 'в', 'не', 'на', 'с', 'что', 'а', 'это', 'из', 'по', 'к', 'но',
+            'он', 'она', 'они', 'мы', 'вы', 'я', 'его', 'её', 'их', 'как', 'или',
+            'то', 'уже', 'всё', 'так', 'же', 'был', 'была', 'были', 'есть', 'за'}
 
-def word_overlap(en_text: str, ru_sentence: str) -> float:
-    """
-    Скор совпадения: транслитерированные EN-слова vs токены RU-предложения.
-    Дополнительно: прямой поиск EN-слов в RU (цифры, аббревиатуры).
-    """
-    en_keys = _key_words_en(en_text)
-    if not en_keys:
+def word_overlap(translated: str, candidate: str) -> float:
+    """Доля слов перевода, найденных в кандидате (по значимым токенам)."""
+    def tokens(s):
+        return {w.strip('.,!?;:—–()«»"\'') for w in s.lower().split()
+                if len(w) > 2 and w not in _STOP_RU}
+    t = tokens(translated)
+    c = tokens(candidate)
+    if not t:
         return 0.0
-
-    ru_tokens = {w.strip('.,!?;:—–()«»"\'').lower()
-                 for w in ru_sentence.split()
-                 if w.strip('.,!?;:—–()«»"\'').lower() not in _STOP_RU}
-
-    matches = sum(
-        1 for k in en_keys
-        if any(k[:4] in rt for rt in ru_tokens)   # частичное совпадение по префиксу
-    )
-    return matches / len(en_keys)
+    return len(t & c) / len(t)
 
 
 # ── Расчёт смещения ───────────────────────────────────────────────────────────
@@ -160,7 +121,6 @@ def review_unmatched(
         conn.close()
         return
 
-    # Смещение
     offset, offset_std = _compute_offset(conn, ru_text_id, translation_id)
     if use_position_window and offset is not None:
         print(f"\n📐 Смещение EN−RU: {offset:+.0f} предл. (σ={offset_std:.0f})")
@@ -169,24 +129,25 @@ def review_unmatched(
         print("\n⚠️  Нет выровненных пар — поиск по всему тексту.")
         use_position_window = False
 
-    # Кодирование LaBSE
     model = get_model()
     print("\n🔢 Кодирую предложения через LaBSE...")
     ru_vecs = model.encode(df_ru["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
     en_vecs = model.encode(df_en["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
-    sim_matrix = _cosine_matrix(ru_vecs, en_vecs)  # (n_ru, n_en)
+    sim_matrix = _cosine_matrix(ru_vecs, en_vecs)
 
-    # Позиционная маска по смещению
     if use_position_window and offset is not None:
         ru_pos      = df_ru["position"].values
         en_pos      = df_en["position"].values
-        expected_ru = en_pos - offset          # (n_en,)
-        pos_diff    = np.abs(ru_pos[:, None] - expected_ru[None, :])  # (n_ru, n_en)
-        in_window   = pos_diff <= tolerance    # булева маска
+        expected_ru = en_pos - offset
+        pos_diff    = np.abs(ru_pos[:, None] - expected_ru[None, :])
+        in_window   = pos_diff <= tolerance
     else:
         in_window = np.ones((len(df_ru), len(df_en)), dtype=bool)
 
-    # Интерактивный обход
+    # Загружаем переводчик один раз
+    print("\n🔤 Загружаю переводчик...")
+    _get_translator()
+
     cursor = conn.cursor()
     stats = {'confirmed': 0, 'skipped': 0}
 
@@ -196,37 +157,37 @@ def review_unmatched(
     print(f"{'='*70}\n")
 
     for j, en_row in df_en.iterrows():
-        en_text = en_row['sentence']
-
-        # Кандидаты в окне
-        window_mask = in_window[:, j]
+        en_text      = en_row['sentence']
+        window_mask  = in_window[:, j]
         if not window_mask.any():
-            window_mask = np.ones(len(df_ru), dtype=bool)  # fallback — весь текст
+            window_mask = np.ones(len(df_ru), dtype=bool)
 
         col_sim = sim_matrix[:, j].copy()
         col_sim[~window_mask] = 0.0
 
-        # Лексический скор (транслитерация без перевода)
+        translated = translate_en_ru(en_text)
+
         lex_scores = np.array([
-            word_overlap(en_text, df_ru.iloc[i]['sentence']) if window_mask[i] else 0.0
+            word_overlap(translated, df_ru.iloc[i]['sentence']) if window_mask[i] else 0.0
             for i in range(len(df_ru))
         ])
 
-        hybrid = 0.5 * col_sim + 0.5 * lex_scores
+        hybrid      = 0.5 * col_sim + 0.5 * lex_scores
         top_indices = np.argsort(hybrid)[::-1][:top_k]
 
         print(f"[{j+1}/{len(df_en)}] EN  (pos={en_row['position']}):")
         print(f"  \"{en_text[:120]}\"")
+        print(f"  → RU: \"{translated[:120]}\"")
         print()
 
         candidates = []
         for rank, ru_i in enumerate(top_indices, 1):
             ru_row  = df_ru.iloc[ru_i]
-            h_score = float(hybrid[ru_i])
-            c_score = float(col_sim[ru_i])
-            l_score = float(lex_scores[ru_i])
-            candidates.append((ru_row, c_score))
-            print(f"  [{rank}] hybrid={h_score:.3f}  (sim={c_score:.3f} + lex={l_score:.3f})  pos={ru_row['position']}")
+            h       = float(hybrid[ru_i])
+            c       = float(col_sim[ru_i])
+            l       = float(lex_scores[ru_i])
+            candidates.append((ru_row, c))
+            print(f"  [{rank}] hybrid={h:.3f}  (sim={c:.3f} + lex={l:.3f})  pos={ru_row['position']}")
             print(f"       \"{ru_row['sentence'][:120]}\"")
         print()
 
