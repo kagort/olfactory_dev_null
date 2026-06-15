@@ -29,7 +29,7 @@ _translator = None
 _tok = None
 
 # Путь к локальной копии модели Helsinki-NLP/opus-mt-en-ru
-_OPUS_MT_PATH = r"C:\Users\Пользователь\.cache\huggingface\hub\models--Helsinki-NLP--opus-mt-en-ru\snapshots\abc123"
+_OPUS_MT_PATH = r"C:\models\opus-mt-en-ru"
 
 def _get_translator():
     global _translator, _tok
