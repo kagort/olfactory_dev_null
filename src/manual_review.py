@@ -35,8 +35,15 @@ def _get_translator():
     global _translator, _tok
     if _translator is None:
         from transformers import MarianMTModel, MarianTokenizer
-        print(f"🔄 Загружаю переводчик из локальной папки...")
-        _tok        = MarianTokenizer.from_pretrained(_OPUS_MT_PATH)
+        import os
+        print("🔄 Загружаю переводчик из локальной папки...")
+        _tok = MarianTokenizer(
+            source_spm=os.path.join(_OPUS_MT_PATH, "source.spm"),
+            target_spm=os.path.join(_OPUS_MT_PATH, "target.spm"),
+            vocab=os.path.join(_OPUS_MT_PATH, "vocab.json"),
+            source_lang="en",
+            target_lang="ru",
+        )
         _translator = MarianMTModel.from_pretrained(_OPUS_MT_PATH)
         print("✅ Переводчик загружен")
     return _translator, _tok
