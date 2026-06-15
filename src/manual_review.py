@@ -28,14 +28,16 @@ from auto_align import get_model, _cosine_matrix
 _translator = None
 _tok = None
 
+# Путь к локальной копии модели Helsinki-NLP/opus-mt-en-ru
+_OPUS_MT_PATH = r"C:\Users\Пользователь\.cache\huggingface\hub\models--Helsinki-NLP--opus-mt-en-ru\snapshots\abc123"
+
 def _get_translator():
     global _translator, _tok
     if _translator is None:
         from transformers import MarianMTModel, MarianTokenizer
-        model_name = "Helsinki-NLP/opus-mt-en-ru"
-        print(f"🔄 Загружаю переводчик {model_name}...")
-        _tok        = MarianTokenizer.from_pretrained(model_name, local_files_only=True)
-        _translator = MarianMTModel.from_pretrained(model_name, local_files_only=True)
+        print(f"🔄 Загружаю переводчик из локальной папки...")
+        _tok        = MarianTokenizer.from_pretrained(_OPUS_MT_PATH)
+        _translator = MarianMTModel.from_pretrained(_OPUS_MT_PATH)
         print("✅ Переводчик загружен")
     return _translator, _tok
 
