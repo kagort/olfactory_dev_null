@@ -299,26 +299,19 @@ def review_unmatched_v2(
     """, (ru_text_id,)).fetchall()
     anchor_pairs: List[Tuple[int, int]] = [(r[0], r[1]) for r in anchor_rows]
 
-    # Имя файла сырого текста
-    filename_row = cursor.execute(
-        "SELECT filename FROM texts WHERE text_id=?", (ru_text_id,)
+    # Сырой текст из поля content
+    content_row = cursor.execute(
+        "SELECT content FROM texts WHERE text_id=?", (ru_text_id,)
     ).fetchone()
-    if not filename_row or not filename_row[0]:
-        print(f"Ошибка: не найден filename для text_id={ru_text_id}")
+    if not content_row or not content_row[0]:
+        print(f"Ошибка: не найден content для text_id={ru_text_id}")
         conn.close()
         return
 
-    raw_path = DATA_DIR / filename_row[0]
-    if not raw_path.exists():
-        print(f"Ошибка: файл не найден: {raw_path}")
-        conn.close()
-        return
-
-    print(f"Читаю сырой текст: {raw_path}")
-    raw_text = raw_path.read_text(encoding='utf-8')
+    print(f"Читаю сырой текст из БД (text_id={ru_text_id})...")
+    raw_text = content_row[0]
     raw_sentences = split_raw_text(raw_text)
     total_ru = len(raw_sentences)
-    print(f"Разбито на {total_ru} предложений")
 
     # ── 2. Pre-computation ────────────────────────────────────────────────────
 
