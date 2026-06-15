@@ -97,6 +97,23 @@ def run_alignment_import():
     subprocess.run([PYTHON, "src/alignment.py", "--import"])
 
 
+def run_review():
+    """
+    python run.py review 1 1          — ручная разметка непривязанных EN
+    python run.py review 1 1 --top 5  — показывать топ-5 кандидатов
+    python run.py review 1 1 --no-window
+    """
+    extra = sys.argv[2:]
+    positional = [a for a in extra if not a.startswith("--")]
+    flags      = [a for a in extra if a.startswith("--")]
+    cmd = [PYTHON, "src/manual_review.py"]
+    if len(positional) >= 2:
+        cmd += ["--ru", positional[0], "--en", positional[1]] + flags
+    else:
+        cmd += extra
+    subprocess.run(cmd)
+
+
 def run_add_book():
     """
     python run.py add-book --ru FILE --en FILE [--meta key=val ...]
@@ -165,6 +182,7 @@ def main():
         "export-align": run_alignment_export,
         "import-align": run_alignment_import,
         "auto-align": run_auto_align,
+        "review": run_review,
         "add-book": run_add_book,
 
         "sborka": sborka

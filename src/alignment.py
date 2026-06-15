@@ -23,12 +23,15 @@ from config import DB_PATH, ALIGNMENT_FILE
 
 
 # ── Цвета для Excel ───────────────────────────────────────────────────────────
-FILL_AUTO      = PatternFill("solid", fgColor="C6EFCE")   # зелёный  — 1-й проход (RU→EN)
-FILL_SUGGESTED = PatternFill("solid", fgColor="FFEB9C")   # жёлтый   — 2-й проход (EN→RU)
-FILL_MANUAL    = PatternFill("solid", fgColor="DDEBF7")   # синий     — ручное
-FILL_HEADER    = PatternFill("solid", fgColor="2F5496")   # тёмно-синий — шапка
+FILL_AUTO      = PatternFill("solid", fgColor="C6EFCE")   # зелёный      — 1-й проход (RU→EN)
+FILL_SUGGESTED = PatternFill("solid", fgColor="FFEB9C")   # жёлтый       — 2-й проход (EN→RU)
+FILL_MANUAL    = PatternFill("solid", fgColor="DDEBF7")   # синий         — ручное, высокий sim
+FILL_MANUAL_LO = PatternFill("solid", fgColor="FFC7CE")   # красный       — ручное, низкий sim
+FILL_HEADER    = PatternFill("solid", fgColor="2F5496")   # тёмно-синий   — шапка
 FONT_HEADER    = Font(color="FFFFFF", bold=True)
 FONT_HINT      = Font(color="888888", italic=True)
+
+SIM_LOW_THRESHOLD = 0.70   # ниже этого порога ручное подтверждение красится красным
 
 
 def get_texts_list(conn):
@@ -218,12 +221,21 @@ def _format_workbook(path, df_en):
             suggested_rows = set(
                 i + 2 for i, val in enumerate(avto_col) if val == '?'
             )
-            # Синие: ручное (ru_№ заполнен, но не авто)
-            manual_rows = set(
-                i + 2
-                for i, (ru_num, avto) in enumerate(zip(ru_col, avto_col))
-                if ru_num != '' and avto == ''
-            )
+            # Ручные: ru_№ заполнен, но не авто — делим на красные (низкий sim) и синие
+            sim_col = df_en['sim'].fillna('')
+            manual_lo_rows = set()  # красные: ручное + низкий sim
+            manual_hi_rows = set()  # синие:   ручное + нормальный sim
+            for i, (ru_num, avto, sim_val) in enumerate(zip(ru_col, avto_col, sim_col)):
+                if ru_num != '' and avto == '':
+                    try:
+                        sim_f = float(sim_val)
+                        if sim_f < SIM_LOW_THRESHOLD:
+                            manual_lo_rows.add(i + 2)
+                        else:
+                            manual_hi_rows.add(i + 2)
+                    except (ValueError, TypeError):
+                        manual_hi_rows.add(i + 2)
+
             for row in ws.iter_rows(min_row=2):
                 r = row[0].row
                 if r in auto_rows:
@@ -232,7 +244,10 @@ def _format_workbook(path, df_en):
                 elif r in suggested_rows:
                     for cell in row:
                         cell.fill = FILL_SUGGESTED
-                elif r in manual_rows:
+                elif r in manual_lo_rows:
+                    for cell in row:
+                        cell.fill = FILL_MANUAL_LO
+                elif r in manual_hi_rows:
                     for cell in row:
                         cell.fill = FILL_MANUAL
 
