@@ -20,3 +20,6 @@ venv/
 
 # Результаты — локальные файлы разметки
 results/
+
+# Claude Code
+.claude/
