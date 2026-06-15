@@ -44,7 +44,9 @@ def get_model():
     if _model is None:
         from sentence_transformers import SentenceTransformer
         print(f"🔄 Загружаю модель {MODEL_NAME}...")
-        _model = SentenceTransformer(MODEL_NAME)
+        # local_files_only=True — не обращаться в сеть, использовать кэш HuggingFace.
+        # Без этого httpx падает на SOCKS4-прокси (не поддерживается).
+        _model = SentenceTransformer(MODEL_NAME, local_files_only=True)
         print("✅ Модель загружена")
     return _model
 
