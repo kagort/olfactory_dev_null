@@ -23,46 +23,85 @@ import pandas as pd
 from config import DB_PATH
 from auto_align import get_model, _cosine_matrix
 
-# ── Перевод EN→RU ─────────────────────────────────────────────────────────────
+# ── Лексический скоринг без перевода ─────────────────────────────────────────
+# Простая транслитерация EN→RU для имён собственных и ключевых слов
 
-_translator = None
-_tok = None
+_TRANSLIT = str.maketrans(
+    'abcdefghijklmnopqrstuvwxyz',
+    'абцдефгхийклмнопqрстуввхыз'
+)
 
-def _get_translator():
-    global _translator, _tok
-    if _translator is None:
-        from transformers import MarianMTModel, MarianTokenizer
-        model_name = "Helsinki-NLP/opus-mt-en-ru"
-        print(f"🔄 Загружаю переводчик {model_name}...")
-        _tok        = MarianTokenizer.from_pretrained(model_name)
-        _translator = MarianMTModel.from_pretrained(model_name)
-        print("✅ Переводчик загружен")
-    return _translator, _tok
+_TRANSLIT_MAP = {
+    'a': 'а', 'b': 'б', 'c': 'к', 'd': 'д', 'e': 'е', 'f': 'ф',
+    'g': 'г', 'h': 'х', 'i': 'и', 'j': 'й', 'k': 'к', 'l': 'л',
+    'm': 'м', 'n': 'н', 'o': 'о', 'p': 'п', 'q': 'к', 'r': 'р',
+    's': 'с', 't': 'т', 'u': 'у', 'v': 'в', 'w': 'в', 'x': 'кс',
+    'y': 'й', 'z': 'з',
+    'ch': 'ч', 'sh': 'ш', 'th': 'з', 'ph': 'ф', 'zh': 'ж',
+}
+
+_STOP_EN = {'the', 'a', 'an', 'and', 'or', 'in', 'on', 'at', 'to', 'of',
+            'is', 'was', 'were', 'it', 'he', 'she', 'they', 'we', 'i',
+            'that', 'this', 'with', 'from', 'by', 'for', 'as', 'but'}
+_STOP_RU = {'и', 'в', 'не', 'на', 'с', 'что', 'а', 'это', 'из', 'по', 'к',
+            'но', 'он', 'она', 'они', 'мы', 'вы', 'я', 'его', 'её', 'их',
+            'как', 'или', 'то', 'уже', 'всё', 'так', 'же', 'был', 'была',
+            'были', 'есть', 'за', 'со', 'ещё', 'тут', 'там'}
 
 
-def translate_en_ru(text: str) -> str:
-    model, tok = _get_translator()
-    inputs = tok([text], return_tensors="pt", padding=True, truncation=True, max_length=512)
-    tokens = model.generate(**inputs)
-    return tok.decode(tokens[0], skip_special_tokens=True)
+def _transliterate(word: str) -> str:
+    """Простая транслитерация английского слова в кириллицу."""
+    word = word.lower()
+    result = ''
+    i = 0
+    while i < len(word):
+        pair = word[i:i+2]
+        if pair in _TRANSLIT_MAP:
+            result += _TRANSLIT_MAP[pair]
+            i += 2
+        elif word[i] in _TRANSLIT_MAP:
+            result += _TRANSLIT_MAP[word[i]]
+            i += 1
+        else:
+            i += 1
+    return result
 
 
-# ── Лексический скоринг ───────────────────────────────────────────────────────
+def _key_words_en(text: str):
+    """Извлекает ключевые слова EN: имена собственные + существительные длиннее 4 букв."""
+    words = text.split()
+    result = set()
+    for i, w in enumerate(words):
+        clean = w.strip('.,!?;:—–()«»"\'').lower()
+        if clean in _STOP_EN or len(clean) < 3:
+            continue
+        # Имя собственное — заглавная буква не в начале предложения
+        if i > 0 and w[0].isupper():
+            result.add(_transliterate(clean))
+        # Длинные содержательные слова
+        elif len(clean) > 4:
+            result.add(_transliterate(clean))
+    return result
 
-_STOP_RU = {'и', 'в', 'не', 'на', 'с', 'что', 'а', 'это', 'из', 'по', 'к', 'но',
-            'он', 'она', 'они', 'мы', 'вы', 'я', 'его', 'её', 'их', 'как', 'или',
-            'то', 'уже', 'всё', 'так', 'же', 'был', 'была', 'были', 'есть', 'за'}
 
-def word_overlap(translated: str, candidate: str) -> float:
-    """Доля слов перевода, найденных в кандидате (Jaccard по значимым токенам)."""
-    def tokens(s):
-        return {w.strip('.,!?;:—–()«»"\'') for w in s.lower().split()
-                if len(w) > 2 and w not in _STOP_RU}
-    t = tokens(translated)
-    c = tokens(candidate)
-    if not t:
+def word_overlap(en_text: str, ru_sentence: str) -> float:
+    """
+    Скор совпадения: транслитерированные EN-слова vs токены RU-предложения.
+    Дополнительно: прямой поиск EN-слов в RU (цифры, аббревиатуры).
+    """
+    en_keys = _key_words_en(en_text)
+    if not en_keys:
         return 0.0
-    return len(t & c) / len(t)
+
+    ru_tokens = {w.strip('.,!?;:—–()«»"\'').lower()
+                 for w in ru_sentence.split()
+                 if w.strip('.,!?;:—–()«»"\'').lower() not in _STOP_RU}
+
+    matches = sum(
+        1 for k in en_keys
+        if any(k[:4] in rt for rt in ru_tokens)   # частичное совпадение по префиксу
+    )
+    return matches / len(en_keys)
 
 
 # ── Расчёт смещения ───────────────────────────────────────────────────────────
@@ -167,10 +206,9 @@ def review_unmatched(
         col_sim = sim_matrix[:, j].copy()
         col_sim[~window_mask] = 0.0
 
-        # Перевод + лексический скор
-        translated = translate_en_ru(en_text)
+        # Лексический скор (транслитерация без перевода)
         lex_scores = np.array([
-            word_overlap(translated, df_ru.iloc[i]['sentence']) if window_mask[i] else 0.0
+            word_overlap(en_text, df_ru.iloc[i]['sentence']) if window_mask[i] else 0.0
             for i in range(len(df_ru))
         ])
 
@@ -179,7 +217,6 @@ def review_unmatched(
 
         print(f"[{j+1}/{len(df_en)}] EN  (pos={en_row['position']}):")
         print(f"  \"{en_text[:120]}\"")
-        print(f"  → перевод: \"{translated[:120]}\"")
         print()
 
         candidates = []
