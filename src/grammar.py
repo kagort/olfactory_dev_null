@@ -52,6 +52,7 @@ def _get_nlp_ru():
             processors="tokenize,pos,lemma,depparse",
             tokenize_no_ssplit=True,
             verbose=False,
+            download_method=stanza.DownloadMethod.REUSE_RESOURCES,
         )
     return _nlp_ru
 
