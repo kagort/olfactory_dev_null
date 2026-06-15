@@ -1,3 +1,3 @@
-file,lang,type,author,title,original_title,translator,original_id,year,genre
-paustovski_story_of_life_ru.txt,ru,original,Паустовский,История жизни,История жизни,,,,
-paustovski_story_of_life_en.txt,en,translation,Паустовский,История жизни,История жизни,,,,
+file,lang,type,author,title,original_title,translator,original_id,year,genre,status
+paustovski_story_of_life_ru.txt,ru,original,Паустовский,История жизни,История жизни,,,,,detected
+paustovski_story_of_life_en.txt,en,translation,Паустовский,История жизни,История жизни,,,,,detected
