@@ -146,7 +146,9 @@ def print_candidate_with_context(
     print(f"  ─────────────────────────────────────────")
     print(f"  pos={position}  [совпало: {', '.join(matched_words)}]")
     for p in context_positions:
-        s = pos_to_sentence.get(p, "")[:120]
+        s = pos_to_sentence.get(p, "")
+        if p != position:
+            s = s[:120]
         prefix = "  >>>" if p == position else "     "
         print(f"  {prefix} {s}")
     print()
