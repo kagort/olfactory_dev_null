@@ -118,7 +118,8 @@ def search_candidates(
     lemma_index: Dict[str, List[int]],
     form_index:  Dict[str, List[int]],
 ) -> List[Tuple[int, List[str]]]:
-    """Возвращает [(position, [matched_words]), ...] по убыванию совпадений."""
+    """Возвращает [(position, [matched_words]), ...] по убыванию совпадений.
+    Если слов больше одного — возвращает только предложения где совпало ≥2 слов."""
     pos_matches: Dict[int, List[str]] = defaultdict(list)
 
     for w in words:
@@ -128,7 +129,12 @@ def search_candidates(
         for p in positions:
             pos_matches[p].append(w)
 
-    results = sorted(pos_matches.items(), key=lambda x: (-len(x[1]), x[0]))
+    min_matches = 2 if len(words) > 1 else 1
+    results = [
+        (pos, matched) for pos, matched in pos_matches.items()
+        if len(matched) >= min_matches
+    ]
+    results.sort(key=lambda x: (-len(x[1]), x[0]))
     return results
 
 
