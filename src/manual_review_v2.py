@@ -327,7 +327,7 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
                 print_candidate_with_context(p, mw, pos_to_sentence, all_positions)
 
             while True:
-                choice = input("  Введите pos (r=новый поиск / s=пропустить / q=выйти): ").strip().lower()
+                choice = input("  Введите pos (несколько через пробел / r=новый поиск / s=пропустить / q=выйти): ").strip().lower()
 
                 if choice == 'q':
                     print(f"\n✅ Прервано. Привязано: {stats['confirmed']}, пропущено: {stats['skipped']}, осталось: {len(en_rows)-idx-1}")
@@ -342,13 +342,21 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
                 if choice == 'r':
                     break
 
-                if choice.isdigit():
-                    pos = int(choice)
-                    if pos not in pos_to_sentence:
-                        print(f"  ❌ Позиция {pos} не найдена в тексте.")
+                parts = choice.split()
+                if all(p.isdigit() for p in parts) and parts:
+                    valid = True
+                    for p_str in parts:
+                        pos = int(p_str)
+                        if pos not in pos_to_sentence:
+                            print(f"  ❌ Позиция {pos} не найдена в тексте.")
+                            valid = False
+                            break
+                    if not valid:
                         continue
-                    sentence = pos_to_sentence[pos]
-                    save_pair(cursor, ru_text_id, en_id, pos, sentence, do_parse, stats)
+                    for p_str in parts:
+                        pos = int(p_str)
+                        sentence = pos_to_sentence[pos]
+                        save_pair(cursor, ru_text_id, en_id, pos, sentence, do_parse, stats)
                     saved = True
                     break
                 else:
