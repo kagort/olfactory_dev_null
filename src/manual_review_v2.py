@@ -8,9 +8,11 @@
     python run.py review --ru 1 --en 1 --parse
 """
 
+import re
 import sqlite3
 import argparse
 from collections import defaultdict
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 
 import syntok.segmenter as segmenter
@@ -70,6 +72,31 @@ def _get_morph():
 def lemmatize(word: str) -> str:
     morph = _get_morph()
     return morph.parse(word.lower())[0].normal_form
+
+
+# ── Пополнение словаря ────────────────────────────────────────────────────────
+
+_CONFIG_PATH = Path(__file__).parent / "config.py"
+_added_words: List[str] = []
+
+
+def add_olfactory_word(word: str, lang: str = 'ru') -> None:
+    lem = lemmatize(word) if lang == 'ru' else word.lower()
+    text = _CONFIG_PATH.read_text(encoding='utf-8')
+    pattern = rf"('{lang}':\s*{{[^}}]*)}}"
+    match = re.search(pattern, text, re.DOTALL)
+    if not match:
+        print(f"  ❌ Не найден блок '{lang}' в config.py")
+        return
+    block = match.group(0)
+    if f"'{lem}'" in block or f'"{lem}"' in block:
+        print(f"  ℹ️  «{lem}» уже есть в словаре.")
+        return
+    new_block = block.rstrip('}').rstrip() + f"\n        '{lem}',\n    }}"
+    new_text = text[:match.start()] + new_block + text[match.end():]
+    _CONFIG_PATH.write_text(new_text, encoding='utf-8')
+    _added_words.append(lem)
+    print(f"  ✅ «{lem}» добавлено в OLFACTORY_WORDS['{lang}']")
 
 
 # ── Разбивка текста ───────────────────────────────────────────────────────────
@@ -280,7 +307,7 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
 
     print(f"\n{'═'*68}")
     print(f"📝 РУЧНАЯ РАЗМЕТКА — {len(en_rows)} предложений")
-    print(f"   Управление: число=выбрать по pos | r=новый поиск | s=пропустить | q=выйти")
+    print(f"   Управление: число=выбрать по pos | r=новый поиск | a=добавить слово в словарь | s=пропустить | q=выйти")
     print(f"{'═'*68}\n")
 
     for idx, (en_id, en_pos, en_text) in enumerate(en_rows):
@@ -295,12 +322,18 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
         skipped = False
         saved = False
         while not skipped and not saved:
-            query = input("  Введите слова для поиска (Enter=пропустить / q=выйти): ").strip()
+            query = input("  Введите слова для поиска (a=добавить в словарь / Enter=пропустить / q=выйти): ").strip()
 
             if query.lower() == 'q':
                 print(f"\n✅ Прервано. Привязано: {stats['confirmed']}, пропущено: {stats['skipped']}, осталось: {len(en_rows)-idx-1}")
                 conn.close()
                 return
+
+            if query.lower() == 'a':
+                word_to_add = input("  Слово для добавления в словарь: ").strip()
+                if word_to_add:
+                    add_olfactory_word(word_to_add)
+                continue
 
             if query == '':
                 stats["skipped"] += 1
@@ -368,6 +401,9 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
     print(f"   Привязано:  {stats['confirmed']}")
     print(f"   Пропущено:  {stats['skipped']}")
     print(f"   Осталось:   {len(en_rows) - stats['confirmed'] - stats['skipped']}")
+    if _added_words:
+        print(f"\n📖 Добавлено в словарь: {', '.join(_added_words)}")
+        print(f"   Запустите 'python run.py detect --clear' и 'python run.py auto-align' для обновления.")
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────────
