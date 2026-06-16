@@ -288,8 +288,8 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
 
         print(f"{'═'*68}")
         print(f"[{idx+1}/{len(en_rows)}] EN (pos={en_pos}):")
-        print(f"  \"{en_text[:120]}\"")
-        print(f"  → RU: \"{translation[:120]}\"")
+        print(f"  \"{en_text}\"")
+        print(f"  → RU: \"{translation}\"")
         print()
 
         skipped = False
