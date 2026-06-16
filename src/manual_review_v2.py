@@ -374,6 +374,8 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
                     break
 
                 if choice == 'r':
+                    print(f"\n  EN: \"{en_text}\"")
+                    print(f"  → RU: \"{translation}\"\n")
                     break
 
                 parts = choice.split()
