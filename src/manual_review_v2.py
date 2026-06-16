@@ -331,8 +331,9 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
 
             if query.lower() == 'a':
                 word_to_add = input("  Слово для добавления в словарь: ").strip()
-                if word_to_add:
-                    add_olfactory_word(word_to_add)
+                lang_choice = input("  Язык (ru/en, Enter=ru): ").strip().lower() or 'ru'
+                if word_to_add and lang_choice in ('ru', 'en'):
+                    add_olfactory_word(word_to_add, lang=lang_choice)
                 continue
 
             if query == '':
