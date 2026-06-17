@@ -22,6 +22,65 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from config import DB_PATH, ALIGNMENT_FILE
 
 
+# ── Тональность: лексиконный подход (fallback) ────────────────────────────────
+
+_POSITIVE_RU = {
+    'аромат', 'благоухание', 'душистый', 'ароматный', 'благоухать',
+    'приятный', 'нежный', 'свежий', 'чудесный', 'восхитительный',
+    'удивительный', 'прекрасный', 'изысканный', 'тонкий', 'чистый',
+    'сладкий', 'сладостный', 'упоительный', 'волшебный', 'дивный',
+}
+_NEGATIVE_RU = {
+    'вонь', 'смерд', 'зловоние', 'вонять', 'смердеть', 'душок',
+    'запашок', 'гарь', 'тухлый', 'гнилой', 'прогорклый', 'едкий',
+    'резкий', 'противный', 'отвратительный', 'тошнотворный', 'нестерпимый',
+    'удушливый', 'кислый', 'прелый', 'затхлый', 'навозный',
+}
+_POSITIVE_EN = {
+    'fragrance', 'aroma', 'perfume', 'scented', 'fragrant', 'sweet',
+    'pleasant', 'fresh', 'delicate', 'wonderful', 'lovely', 'delicious',
+    'exquisite', 'beautiful', 'clean', 'pure', 'wondrous',
+}
+_NEGATIVE_EN = {
+    'stench', 'stink', 'reek', 'reeks', 'stank', 'stunk', 'putrid',
+    'rotten', 'foul', 'rank', 'acrid', 'pungent', 'nauseating',
+    'revolting', 'fetid', 'musty', 'rancid', 'moldy', 'sulfur',
+}
+
+
+def _lexicon_sentiment(text: str, pos_words: set, neg_words: set) -> str:
+    words = set(text.lower().split())
+    has_pos = bool(words & pos_words)
+    has_neg = bool(words & neg_words)
+    if has_pos and has_neg:
+        return 'negativ\\neutral'
+    if has_pos:
+        return 'positiv'
+    if has_neg:
+        return 'negativ'
+    return 'neutral'
+
+
+def sentiment_ru(text: str) -> str:
+    try:
+        from sentiment import sentiment_ru as _model_ru, is_available
+        if is_available('ru'):
+            return _model_ru(text)
+    except Exception:
+        pass
+    return _lexicon_sentiment(text, _POSITIVE_RU, _NEGATIVE_RU)
+
+
+def sentiment_en(text: str) -> str:
+    try:
+        from sentiment import sentiment_en as _model_en, is_available
+        if is_available('en'):
+            return _model_en(text)
+    except Exception:
+        pass
+    return _lexicon_sentiment(text, _POSITIVE_EN, _NEGATIVE_EN)
+
+
 # ── Цвета для Excel ───────────────────────────────────────────────────────────
 FILL_AUTO      = PatternFill("solid", fgColor="C6EFCE")
 FILL_SUGGESTED = PatternFill("solid", fgColor="FFEB9C")

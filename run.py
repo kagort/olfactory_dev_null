@@ -146,6 +146,16 @@ def run_auto_align():
     subprocess.run(cmd)
 
 
+def run_parse():
+    """
+    python run.py parse --ru 1       — разбор RU предложений
+    python run.py parse --en 1       — разбор EN предложений
+    python run.py parse --ru 1 --en 1 --lang ru
+    """
+    extra = sys.argv[2:]
+    subprocess.run([PYTHON, "src/parse_sentences.py"] + extra)
+
+
 def sborka():
     run_db()
     run_migrate()
@@ -178,6 +188,7 @@ def main():
         "auto-align": run_auto_align,
         "review": run_review,
         "add-book": run_add_book,
+        "parse": run_parse,
 
         "sborka": sborka
     }
