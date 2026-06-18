@@ -320,23 +320,42 @@ def import_alignment_from_excel(conn, excel_path=ALIGNMENT_FILE):
 
     ru_num_to_id = dict(zip(df_ru['№'].astype(int), df_ru['ru_id'].astype(int)))
 
-    df_filled = df_en[
+    # Строки где авто=0 — удалить связь; остальные заполненные — добавить
+    df_active = df_en[
         df_en['ru_№'].notna() &
         (df_en['ru_№'].astype(str).str.strip() != '')
     ].copy()
 
-    if df_filled.empty:
-        print("❌ Колонка ru_№ пуста — нечего импортировать")
-        return None
+    df_delete = df_en[
+        df_en['авто'].astype(str).str.strip() == '0'
+    ].copy()
 
-    print(f"\n📥 Импорт: {len(df_filled)} заполненных EN-строк")
+    print(f"\n📥 Импорт: {len(df_active)} заполненных EN-строк, удалений: {len(df_delete)}")
 
     cursor = conn.cursor()
-    stats = {'inserted': 0, 'already': 0, 'errors': 0}
+    stats = {'inserted': 0, 'already': 0, 'deleted': 0, 'errors': 0}
 
-    for _, row in df_filled.iterrows():
+    # Удаление помеченных строк (авто=0)
+    for _, row in df_delete.iterrows():
+        try:
+            en_id = int(row['en_id'])
+            cursor.execute(
+                "DELETE FROM alignment WHERE sentence_en_id=?", (en_id,))
+            deleted = cursor.rowcount
+            if deleted:
+                stats['deleted'] += deleted
+                print(f"   🗑️  Удалена связь для en_id={en_id} ({deleted} запись)")
+        except Exception as e:
+            print(f"   ⚠️  Ошибка удаления en_id={row.get('en_id')}: {e}")
+            stats['errors'] += 1
+
+    # Добавление / проверка остальных пар
+    for _, row in df_active.iterrows():
         try:
             en_id  = int(row['en_id'])
+            # Пропустить строки помеченные на удаление
+            if str(row.get('авто', '')).strip() == '0':
+                continue
             ru_num = int(float(str(row['ru_№']).strip()))
             ru_id  = ru_num_to_id.get(ru_num)
 
@@ -366,6 +385,7 @@ def import_alignment_from_excel(conn, excel_path=ALIGNMENT_FILE):
     print(f"\n✅ Импорт завершён:")
     print(f"   Добавлено: {stats['inserted']}")
     print(f"   Уже было:  {stats['already']}")
+    print(f"   Удалено:   {stats['deleted']}")
     print(f"   Ошибок:    {stats['errors']}")
 
     return stats
