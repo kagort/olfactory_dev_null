@@ -223,3 +223,112 @@ def to_gram_json(gram_str: str) -> dict:
 def parse_to_json(gram_str: str) -> str:
     """Обёртка: возвращает to_gram_json как JSON-строку для записи в БД."""
     return json.dumps(to_gram_json(gram_str), ensure_ascii=False)
+
+
+# ── Извлечение концептуальной синтагмы ───────────────────────────────────────
+
+def _collect_subtree_ru(word_id: int, children: dict, words_by_id: dict) -> set:
+    """Рекурсивно собирает все id слов в поддереве (включая сам word_id)."""
+    result = {word_id}
+    for child in children.get(word_id, []):
+        result |= _collect_subtree_ru(child.id, children, words_by_id)
+    return result
+
+
+def extract_concept_phrase_ru(text: str, olfactory_lemmas: set) -> str:
+    """
+    Находит ольфакторный токен в RU предложении и возвращает полную
+    синтаксическую синтагму: поддерево токена + его голову если та
+    является нефинитным глаголом.
+
+    Однородные члены (conj) сохраняются автоматически как часть поддерева.
+    """
+    if not text or not text.strip():
+        return text
+
+    import pymorphy3
+    morph = pymorphy3.MorphAnalyzer()
+
+    doc = _get_nlp_ru()(text.strip().rstrip("."))
+    if not doc.sentences:
+        return text
+
+    words = doc.sentences[0].words
+    children: dict = {w.id: [] for w in words}
+    words_by_id: dict = {w.id: w for w in words}
+
+    for w in words:
+        if w.head and w.head in children and w.head != w.id:
+            children[w.head].append(w)
+
+    # Найти ольфакторный токен
+    target = None
+    for w in words:
+        lemma_stanza = (w.lemma or w.text).lower()
+        lemma_morph = morph.parse(w.text.lower())[0].normal_form
+        if lemma_stanza in olfactory_lemmas or lemma_morph in olfactory_lemmas or w.text.lower() in olfactory_lemmas:
+            target = w
+            break
+
+    if target is None:
+        return text
+
+    # Поддерево ольфакторного токена
+    token_ids = _collect_subtree_ru(target.id, children, words_by_id)
+
+    # Идём вверх: включаем голову если она нефинитный глагол (причастие/деепричастие)
+    head_id = target.head
+    if head_id and head_id != target.id and head_id in words_by_id:
+        head_word = words_by_id[head_id]
+        head_feats = (head_word.feats or "").lower()
+        # нефинитные формы: VerbForm=Part, VerbForm=Conv, VerbForm=Inf
+        is_nonfinite = (
+            head_word.upos == "VERB"
+            and ("verbform=part" in head_feats or "verbform=conv" in head_feats or "verbform=inf" in head_feats)
+        )
+        if is_nonfinite:
+            token_ids |= _collect_subtree_ru(head_id, children, words_by_id)
+
+    # Собрать текст по порядку
+    phrase_words = sorted([words_by_id[i] for i in token_ids], key=lambda w: w.id)
+    phrase_words = [w for w in phrase_words if (w.upos or "X") != "PUNCT"]
+    return " ".join(w.text for w in phrase_words)
+
+
+def extract_concept_phrase_en(text: str, olfactory_lemmas: set) -> str:
+    """
+    Находит ольфакторный токен в EN предложении и возвращает полную
+    синтаксическую синтагму: поддерево токена + его голову если та
+    является нефинитным глаголом.
+
+    Однородные члены (conj) сохраняются автоматически как часть поддерева.
+    """
+    if not text or not text.strip():
+        return text
+
+    doc = _get_nlp_en()(text.strip().rstrip("."))
+
+    # Найти ольфакторный токен
+    target = None
+    for tok in doc:
+        if tok.lemma_.lower() in olfactory_lemmas or tok.text.lower() in olfactory_lemmas:
+            target = tok
+            break
+
+    if target is None:
+        return text
+
+    # spaCy даёт subtree напрямую
+    token_ids = {t.i for t in target.subtree}
+
+    # Идём вверх: включаем голову если нефинитный глагол
+    if target.dep_ != "ROOT" and target.head.i != target.i:
+        head = target.head
+        if head.pos_ == "VERB" and head.dep_ != "ROOT" and head.morph.get("VerbForm"):
+            vf = head.morph.get("VerbForm")
+            if any(v in ("Part", "Inf", "Ger") for v in vf):
+                token_ids |= {t.i for t in head.subtree}
+
+    phrase_tokens = sorted([doc[i] for i in token_ids], key=lambda t: t.i)
+    phrase_tokens = [t for t in phrase_tokens if t.pos_ not in ("PUNCT", "SPACE")]
+    return " ".join(t.text for t in phrase_tokens)
