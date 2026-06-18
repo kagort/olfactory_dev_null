@@ -19,7 +19,7 @@ from typing import List, Dict, Optional, Tuple
 # # Добавляем корень проекта в путь
 # sys.path.insert(0, str(Path(__file__).parent.parent))
 from config import DB_PATH, OLFACTORY_WORDS
-from grammar import parse_ru, parse_en, parse_to_json
+from grammar import parse_ru, parse_en, parse_to_json, extract_concept_phrase_ru, extract_concept_phrase_en
 
 _nlp_cache = {}
 _morph_ru = None
@@ -57,19 +57,15 @@ def split_sentences(text: str) -> List[str]:
     return sentences
 
 
-def extract_context(words: List[str], word_pos: int, window: int = 3) -> Tuple[str, str, str]:
-    """Извлекает контекст"""
+def extract_context(words: List[str], word_pos: int, window: int = 3) -> Tuple[str, str]:
+    """Извлекает левый и правый контекст (±window слов)."""
     left_start = max(0, word_pos - window)
     left_context = ' '.join(words[left_start:word_pos])
 
     right_end = min(len(words), word_pos + window + 1)
     right_context = ' '.join(words[word_pos + 1:right_end])
 
-    concept_start = max(0, word_pos - 2)
-    concept_end = min(len(words), word_pos + 3)
-    concept_phrase = ' '.join(words[concept_start:concept_end])
-
-    return left_context, right_context, concept_phrase
+    return left_context, right_context
 
 
 def _has_smell_word_ru(sentence: str, smell_words: set) -> bool:
@@ -112,25 +108,34 @@ def analyze_sentence(sentence: str, position: int, language: str) -> Optional[Di
             match = token.lemma_.lower() in smell_words or token.text.lower() in smell_words
 
         if match:
-            left, right, concept = extract_context(words, token.i)
+            left, right = extract_context(words, token.i)
             found_smells.append({
                 'word': token.text,
                 'lemma': token.lemma_,
                 'pos': token.pos_,
                 'left_context': left,
                 'right_context': right,
-                'concept_phrase': concept
             })
 
     if not found_smells:
         return None
 
     first = found_smells[0]
-    concept = first['concept_phrase']
+
+    # Извлекаем концептуальную синтагму через dependency tree
+    try:
+        if language == 'ru':
+            concept = extract_concept_phrase_ru(sentence, smell_words)
+        else:
+            concept = extract_concept_phrase_en(sentence, smell_words)
+    except Exception:
+        concept = sentence  # fallback
+
     try:
         gram = parse_ru(concept) if language == 'ru' else parse_en(concept)
     except Exception:
         gram = None
+
     return {
         'position': position,
         'sentence': sentence,
@@ -252,26 +257,41 @@ def process_all_texts(clear_all: bool = False):
 
 
 def parse_gram_structures():
-    """Пересчитывает gram_structure и gram_json для всех предложений в БД."""
+    """
+    Пересчитывает concept_phrase, gram_structure и gram_json для всех
+    предложений в БД, используя корректное поддерево dependency parse.
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    cursor.execute("SELECT sentence_id, language, concept_phrase FROM sentences WHERE concept_phrase IS NOT NULL")
+    cursor.execute("SELECT sentence_id, language, sentence FROM sentences WHERE sentence IS NOT NULL")
     rows = cursor.fetchall()
-    print(f"\n🔍 UD-парсинг {len(rows)} предложений...")
+    print(f"\n🔍 Пересчёт concept_phrase + gram_structure для {len(rows)} предложений...")
+
+    smell_words_ru = OLFACTORY_WORDS.get('ru', set())
+    smell_words_en = OLFACTORY_WORDS.get('en', set())
 
     updated = 0
-    for sentence_id, lang, concept in rows:
+    for sentence_id, lang, sentence in rows:
         try:
+            smell_words = smell_words_ru if lang == 'ru' else smell_words_en
+            if lang == 'ru':
+                concept = extract_concept_phrase_ru(sentence, smell_words)
+            else:
+                concept = extract_concept_phrase_en(sentence, smell_words)
             gram = parse_ru(concept) if lang == 'ru' else parse_en(concept)
             gram_j = parse_to_json(gram)
             cursor.execute(
-                "UPDATE sentences SET gram_structure = ?, gram_json = ? WHERE sentence_id = ?",
-                (gram, gram_j, sentence_id)
+                "UPDATE sentences SET concept_phrase=?, gram_structure=?, gram_json=? WHERE sentence_id=?",
+                (concept, gram, gram_j, sentence_id)
             )
             updated += 1
         except Exception as e:
             print(f"   ⚠️  sentence_id={sentence_id}: {e}")
+
+        if updated % 50 == 0 and updated:
+            conn.commit()
+            print(f"   {updated}/{len(rows)}", end="\r", flush=True)
 
     conn.commit()
     conn.close()
