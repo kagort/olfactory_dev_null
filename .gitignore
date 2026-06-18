@@ -1,4 +1,4 @@
-# Python cache
+а# Python cache
 __pycache__/
 *.pyc
 *.pyo
@@ -20,6 +20,3 @@ venv/
 
 # Результаты — локальные файлы разметки
 results/
-
-# Claude Code
-.claude/
