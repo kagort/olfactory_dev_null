@@ -17,7 +17,8 @@ from typing import List, Dict, Tuple, Optional
 
 import syntok.segmenter as segmenter
 
-from config import DB_PATH
+from config import DB_PATH, OLFACTORY_WORDS
+from grammar import extract_concept_phrase_ru, parse_ru, parse_to_json
 
 # ── Переводчик EN→RU ──────────────────────────────────────────────────────────
 
@@ -207,24 +208,34 @@ def save_pair(
     if row:
         ru_id = row[0]
     else:
-        gram_structure, gram_json = None, None
-        if do_parse:
-            try:
-                from grammar import parse_ru
-                result = parse_ru(sentence)
-                if result:
-                    gram_structure = result.get("structure")
-                    import json
-                    gram_json = json.dumps(result, ensure_ascii=False)
-            except Exception:
-                pass
+        # Извлекаем concept_phrase и gram_structure для новой записи
+        smell_words = OLFACTORY_WORDS.get('ru', set())
+        try:
+            concept = extract_concept_phrase_ru(sentence, smell_words)
+        except Exception:
+            concept = None
+        try:
+            gram_structure = parse_ru(concept or sentence)
+            gram_json = parse_to_json(gram_structure)
+        except Exception:
+            gram_structure, gram_json = None, None
+
+        # Найти search_word (первое совпавшее ольфакторное слово)
+        import pymorphy3
+        morph = pymorphy3.MorphAnalyzer()
+        search_word = None
+        for w in sentence.split():
+            clean = w.strip('.,!?;:—–()«»"\'').lower()
+            if morph.parse(clean)[0].normal_form in smell_words or clean in smell_words:
+                search_word = w.strip('.,!?;:—–()«»"\'')
+                break
 
         cursor.execute(
             """INSERT INTO sentences
                (source_type, text_id, position, sentence, language,
-                search_word, gram_structure, gram_json)
-               VALUES ('original', ?, ?, ?, 'ru', NULL, ?, ?)""",
-            (ru_text_id, position, sentence, gram_structure, gram_json)
+                search_word, concept_phrase, gram_structure, gram_json)
+               VALUES ('original', ?, ?, ?, 'ru', ?, ?, ?, ?)""",
+            (ru_text_id, position, sentence, search_word, concept, gram_structure, gram_json)
         )
         ru_id = cursor.lastrowid
 

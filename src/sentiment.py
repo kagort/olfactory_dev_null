@@ -3,8 +3,8 @@
 Анализ тональности через локальные модели.
 
 Модели (скачать вручную):
-  RU: sismetanin/roberta-russian-sentiment → C:\models\roberta-russian-sentiment\
-  EN: cardiffnlp/twitter-roberta-base-sentiment-latest → C:\models\twitter-roberta-sentiment\
+  RU: sismetanin/roberta-russian-sentiment → C:\\models\\roberta-russian-sentiment\\
+  EN: cardiffnlp/twitter-roberta-base-sentiment-latest → C:\\models\\twitter-roberta-sentiment\\
 
 Использование:
   from sentiment import sentiment_ru, sentiment_en
