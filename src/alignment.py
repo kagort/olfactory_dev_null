@@ -22,7 +22,7 @@ from openpyxl.styles import PatternFill, Font, Alignment
 from config import DB_PATH, ALIGNMENT_FILE
 
 
-# ── Тональность: лексиконный подход (fallback) ────────────────────────────────
+# ── Тональность ───────────────────────────────────────────────────────────────
 
 _POSITIVE_RU = {
     'аромат', 'благоухание', 'душистый', 'ароматный', 'благоухать',
@@ -92,53 +92,6 @@ FONT_HEADER    = Font(color="FFFFFF", bold=True)
 SIM_LOW_THRESHOLD = 0.70
 
 
-# ── Тональность: лексиконный подход ──────────────────────────────────────────
-
-_POSITIVE_RU = {
-    'аромат', 'благоухание', 'душистый', 'ароматный', 'благоухать',
-    'приятный', 'нежный', 'свежий', 'чудесный', 'восхитительный',
-    'удивительный', 'прекрасный', 'изысканный', 'тонкий', 'чистый',
-    'сладкий', 'сладостный', 'упоительный', 'волшебный', 'дивный',
-}
-_NEGATIVE_RU = {
-    'вонь', 'смерд', 'зловоние', 'вонять', 'смердеть', 'душок',
-    'запашок', 'гарь', 'тухлый', 'гнилой', 'прогорклый', 'едкий',
-    'резкий', 'противный', 'отвратительный', 'тошнотворный', 'нестерпимый',
-    'удушливый', 'кислый', 'прелый', 'затхлый', 'навозный',
-}
-_POSITIVE_EN = {
-    'fragrance', 'aroma', 'perfume', 'scented', 'fragrant', 'sweet',
-    'pleasant', 'fresh', 'delicate', 'wonderful', 'lovely', 'delicious',
-    'exquisite', 'beautiful', 'clean', 'pure', 'wondrous',
-}
-_NEGATIVE_EN = {
-    'stench', 'stink', 'reek', 'reeks', 'stank', 'stunk', 'putrid',
-    'rotten', 'foul', 'rank', 'acrid', 'pungent', 'nauseating',
-    'revolting', 'fetid', 'musty', 'rancid', 'moldy', 'sulfur',
-}
-
-
-def _sentiment(text: str, pos_words: set, neg_words: set) -> str:
-    words = set(text.lower().split())
-    has_pos = bool(words & pos_words)
-    has_neg = bool(words & neg_words)
-    if has_pos and has_neg:
-        return 'negativ\\neutral'
-    if has_pos:
-        return 'positiv'
-    if has_neg:
-        return 'negativ'
-    return 'neutral'
-
-
-def sentiment_ru(text: str) -> str:
-    return _sentiment(text, _POSITIVE_RU, _NEGATIVE_RU)
-
-
-def sentiment_en(text: str) -> str:
-    return _sentiment(text, _POSITIVE_EN, _NEGATIVE_EN)
-
-
 # ── Translation shift ─────────────────────────────────────────────────────────
 
 def translation_shift(cosine_sim) -> str:
@@ -194,7 +147,7 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
     # ── 1. Предложения с gram_structure и concept_phrase ──────────────────────
     df_ru = pd.read_sql_query(f"""
         SELECT sentence_id AS ru_id, position, sentence,
-               concept_phrase, gram_structure
+               search_word AS token_text, concept_phrase, gram_structure
         FROM sentences
         WHERE source_type='original' AND text_id={ru_text_id} AND language='ru'
         ORDER BY position
@@ -202,7 +155,7 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
 
     df_en = pd.read_sql_query(f"""
         SELECT sentence_id AS en_id, position, sentence,
-               concept_phrase, gram_structure
+               search_word AS token_text, concept_phrase, gram_structure
         FROM sentences
         WHERE source_type='translation' AND translation_id={translation_id} AND language='en'
         ORDER BY position
@@ -266,10 +219,10 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
     # ── 7. Запись в Excel ─────────────────────────────────────────────────────
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
 
-    ru_cols = ['№', 'ru_id', 'position', 'sentence', 'concept_phrase',
-               'gram_structure', 'тональность', 'кол-во EN', 'EN №']
-    en_cols = ['№', 'en_id', 'position', 'sentence', 'concept_phrase',
-               'gram_structure', 'тональность', 'ru_№', 'sim', 'авто', 'translation_shift']
+    ru_cols = ['№', 'ru_id', 'position', 'sentence', 'token_text',
+               'concept_phrase', 'gram_structure', 'тональность', 'кол-во EN', 'EN №']
+    en_cols = ['№', 'en_id', 'position', 'sentence', 'token_text',
+               'concept_phrase', 'тональность', 'ru_№', 'sim', 'авто', 'translation_shift']
 
     with pd.ExcelWriter(output_path, engine='openpyxl') as writer:
         df_en[en_cols].to_excel(writer, sheet_name='Английские', index=False)
@@ -294,8 +247,10 @@ def _format_workbook(path, df_en):
     wb = load_workbook(path)
 
     col_widths = {
-        'Английские': [5, 8, 8, 70, 30, 40, 12, 8, 8, 6, 18],
-        'Русские':    [5, 8, 8, 70, 30, 40, 12, 10, 10],
+        # №  id  pos  sentence  token  concept  gram  тон  кол-во  EN№
+        'Русские':    [5, 8, 8, 70, 14, 35, 45, 12, 10, 10],
+        # №  id  pos  sentence  token  concept  тон  ru№  sim  авто  shift
+        'Английские': [5, 8, 8, 70, 14, 35, 12, 8, 8, 6, 18],
     }
 
     for sheet_name in wb.sheetnames:
