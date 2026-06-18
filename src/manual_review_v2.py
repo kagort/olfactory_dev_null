@@ -20,6 +20,19 @@ import syntok.segmenter as segmenter
 from config import DB_PATH, OLFACTORY_WORDS
 from grammar import extract_concept_phrase_ru, parse_ru, parse_to_json
 
+
+def _compute_sim(ru_text: str, en_text: str) -> float:
+    """Косинусное сходство LaBSE между двумя предложениями."""
+    try:
+        import numpy as np
+        from auto_align import get_model, _cosine_matrix
+        model = get_model()
+        ru_vec = model.encode([ru_text], convert_to_numpy=True)
+        en_vec = model.encode([en_text], convert_to_numpy=True)
+        return float(_cosine_matrix(ru_vec, en_vec)[0, 0])
+    except Exception:
+        return None
+
 # ── Переводчик EN→RU ──────────────────────────────────────────────────────────
 
 _translator = None
@@ -198,6 +211,7 @@ def save_pair(
     sentence: str,
     do_parse: bool,
     stats: Dict,
+    en_text: str = "",
 ):
     # Найти или создать sentence_id
     row = cursor.execute(
@@ -249,15 +263,17 @@ def save_pair(
         print("  ℹ️  Эта пара уже есть в БД.\n")
         return
 
+    sim = _compute_sim(sentence, en_text) if en_text else None
     cursor.execute(
         """INSERT INTO alignment
            (sentence_ru_id, sentence_en_id, cosine_sim, auto_aligned, assisted)
-           VALUES (?, ?, NULL, 0, 1)""",
-        (ru_id, en_sentence_id)
+           VALUES (?, ?, ?, 0, 1)""",
+        (ru_id, en_sentence_id, round(sim, 4) if sim is not None else None)
     )
     cursor.connection.commit()
     stats["confirmed"] += 1
-    print(f"  ✅ Сохранено (ru_id={ru_id}, pos={position})\n")
+    sim_str = f", sim={sim:.3f}" if sim is not None else ""
+    print(f"  ✅ Сохранено (ru_id={ru_id}, pos={position}{sim_str})\n")
 
 
 # ── Основная функция ──────────────────────────────────────────────────────────
@@ -403,7 +419,7 @@ def review_unmatched(ru_text_id: int, translation_id: int, do_parse: bool = Fals
                     for p_str in parts:
                         pos = int(p_str)
                         sentence = pos_to_sentence[pos]
-                        save_pair(cursor, ru_text_id, en_id, pos, sentence, do_parse, stats)
+                        save_pair(cursor, ru_text_id, en_id, pos, sentence, do_parse, stats, en_text=en_text)
                     saved = True
                     break
                 else:
