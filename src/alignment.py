@@ -178,6 +178,47 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
           AND se.translation_id = {translation_id}
     """, conn)
 
+    # ── 3.5. Дозаполнение cosine_sim для пар без него ────────────────────────
+    missing = df_align[df_align['cosine_sim'].isna()]
+    if not missing.empty:
+        print(f"   🔢 Вычисляю cosine_sim для {len(missing)} пар без оценки...")
+        try:
+            import numpy as np
+            from auto_align import get_model, _cosine_matrix
+            model = get_model()
+            cursor = conn.cursor()
+            for _, row in missing.iterrows():
+                ru_row = pd.read_sql_query(
+                    "SELECT sentence FROM sentences WHERE sentence_id=?",
+                    conn, params=(int(row['ru_id']),))
+                en_row = pd.read_sql_query(
+                    "SELECT sentence FROM sentences WHERE sentence_id=?",
+                    conn, params=(int(row['en_id']),))
+                if ru_row.empty or en_row.empty:
+                    continue
+                ru_vec = model.encode([ru_row.iloc[0]['sentence']], convert_to_numpy=True)
+                en_vec = model.encode([en_row.iloc[0]['sentence']], convert_to_numpy=True)
+                sim = float(_cosine_matrix(ru_vec, en_vec)[0, 0])
+                cursor.execute(
+                    "UPDATE alignment SET cosine_sim=? WHERE sentence_ru_id=? AND sentence_en_id=?",
+                    (round(sim, 4), int(row['ru_id']), int(row['en_id'])))
+            conn.commit()
+            # Перечитываем df_align с обновлёнными значениями
+            df_align = pd.read_sql_query(f"""
+                SELECT a.sentence_ru_id AS ru_id,
+                       a.sentence_en_id AS en_id,
+                       a.cosine_sim,
+                       COALESCE(a.auto_aligned, 0) AS auto_aligned
+                FROM alignment a
+                JOIN sentences sr ON sr.sentence_id = a.sentence_ru_id
+                JOIN sentences se ON se.sentence_id = a.sentence_en_id
+                WHERE sr.text_id = {ru_text_id}
+                  AND se.translation_id = {translation_id}
+            """, conn)
+            print(f"   ✅ cosine_sim обновлён")
+        except Exception as e:
+            print(f"   ⚠️  Не удалось вычислить sim: {e}")
+
     # ── 4. Порядковые номера ──────────────────────────────────────────────────
     df_ru.insert(0, '№', range(1, len(df_ru) + 1))
     df_en.insert(0, '№', range(1, len(df_en) + 1))
