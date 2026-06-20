@@ -119,19 +119,21 @@ olfactory-corpus/
 
 ## Формат CSV с метаданными (`data/metadata.csv`)
 
-| Колонка  | Описание                                  | Пример             |
-| --------------- | ------------------------------------------------- | ------------------------ |
-| `file`        | Имя файла в `data/books/raw/`          | `war_and_peace_ru.txt` |
-| `lang`        | Язык (`ru` или `en`)                   | `ru`                   |
-| `type`        | `original` или `translation`               | `translation`             |
-| `author`      | Автор                                        | `Толстой`       |
-| `title`       | Название                                  | `Peace and war` |
-| `original_title` | Название оригинала (для переводов) | `Война и пир` | 
-| `translator`  | Переводчик (для переводов)  | `Maude`                |
-| `original_id` | ID оригинала (для переводов) | `1`                    |
+| Колонка     | Описание                                                | Пример             |
+| ------------------ | --------------------------------------------------------------- | ------------------------ |
+| `file`           | Имя файла в `data/books/raw/`                        | `war_and_peace_ru.txt` |
+| `lang`           | Язык (`ru` или `en`)                                 | `ru`                   |
+| `type`           | `original` или `translation`                             | `translation`          |
+| `author`         | Автор                                                      | `Толстой`       |
+| `title`          | Название                                                | `Peace and war`        |
+| `original_title` | Название оригинала (для переводов) | `Война и пир` |
+| `translator`     | Переводчик (для переводов)                | `Maude`                |
+| `original_id`    | ID оригинала (для переводов)               | `1`                    |
 
 ## Требования
 
 - Python 3.9+
 - SQLite3
 - Виртуальное окружение (рекомендуется)
+- python -c "from transformers import MarianMTModel, MarianTokenizer; import os; os.makedirs('C:/models/opus-mt-en-ru', exist_ok=True); model_name='Helsinki-NLP/opus-mt-en-ru'; tokenizer=MarianTokenizer.from_pretrained(model_name); model=MarianMTModel.from_pretrained(model_name); model.save_pretrained('C:/models/opus-mt-en-ru'); tokenizer.save_pretrained('C:/models/opus-mt-en-ru'); print('ГОТОВО! Модель скачана в C:/models/opus-mt-en-ru')"
+- python -c "from sentence_transformers import SentenceTransformer; model = SentenceTransformer('cointegrated/LaBSE-en-ru'); model.save('labse_model')"

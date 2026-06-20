@@ -184,7 +184,7 @@ def export_for_alignment(conn, ru_text_id, translation_id, output_path=ALIGNMENT
         print(f"   🔢 Вычисляю cosine_sim для {len(missing)} пар без оценки...")
         try:
             import numpy as np
-            from auto_align import get_model, _cosine_matrix
+            from olfactory_dev_null.src.align_auto import get_model, _cosine_matrix
             model = get_model()
             cursor = conn.cursor()
             for _, row in missing.iterrows():

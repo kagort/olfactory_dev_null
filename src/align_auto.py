@@ -28,6 +28,9 @@ import pandas as pd
 from pathlib import Path
 from typing import Optional
 
+# В начале файла
+from tqdm import tqdm
+
 from config import DB_PATH
 
 # ── Ленивая загрузка модели ───────────────────────────────────────────────────

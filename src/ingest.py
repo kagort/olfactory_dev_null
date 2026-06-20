@@ -1,26 +1,114 @@
-# src/ingest.py
 """
 Загрузка книг из CSV в базу данных
 Запуск: 
-    python src/ingest.py              # загрузить новые книги
-    python src/ingest.py --link       # связать переводы с оригиналами
-    python src/ingest.py --check      # проверить несвязанные переводы
+    python src/ingest.py                                    # загрузить всё
+    python src/ingest.py --files f1.txt f2.txt             # загрузить конкретные
+    python src/ingest.py --add --ru f.txt --en f.txt       # добавить пару в SCV
+    python src/ingest.py --add --ru f.txt --en f.txt --meta author=Толстой title_ru="Война и мир" title_en="War and Peace"
+    
+    python src/ingest.py --link                             # связать переводы
+    python src/ingest.py --check                            # проверить несвязанные
 """
 
+import sys
 import sqlite3
+import argparse
+import hashlib
 import pandas as pd
 from pathlib import Path
 from config import DB_PATH, CSV_PATH, DATA_DIR
 
-# Пути
-# DB_PATH = Path(__file__).parent.parent / "db" / "olfactory.db"
-# CSV_PATH = Path(__file__).parent.parent / "data" / "metadata.csv"
-# DATA_DIR = Path(__file__).parent.parent / "data" / "books" / "raw"
+
+# ── Утилиты ──────────────────────────────────────────────────────────────────
+
+def file_hash(path: Path) -> str:
+    """Считает MD5 хэш файла"""
+    return hashlib.md5(path.read_bytes()).hexdigest()
 
 
-# ============================================================
-# 1. ЗАГРУЗКА НОВЫХ КНИГ ИЗ CSV
-# ============================================================
+def hash_exists(cursor, h: str) -> bool:
+    """Проверяет, есть ли файл с таким хэшем в БД"""
+    r = cursor.execute(
+        "SELECT 1 FROM texts WHERE file_hash=? UNION SELECT 1 FROM translations WHERE file_hash=?",
+        (h, h)
+    ).fetchone()
+    return r is not None
+
+
+def append_to_csv(ru_file: Path, en_file: Path, meta: dict):
+    """
+    Добавляет строки в metadata.csv.
+    
+    Поддерживаемые метаданные:
+    - author: автор
+    - title_ru: название оригинала (русское)
+    - title_en: название перевода (английское)
+    - translator: переводчик
+    - year: год издания
+    - genre: жанр
+    - original_title: для связи (если отличается от title_ru)
+    """
+    df = pd.read_csv(CSV_PATH)
+    if 'status' not in df.columns:
+        df['status'] = ''
+
+    def _row_exists(fname):
+        return fname in df['file'].values
+
+    # Получаем названия
+    title_ru = meta.get('title_ru', meta.get('title', ru_file.stem))
+    title_en = meta.get('title_en', meta.get('title', en_file.stem))
+    original_title = meta.get('original_title', title_ru)  # для связи
+    
+    rows = []
+    
+    # Русский оригинал
+    if not _row_exists(ru_file.name):
+        rows.append({
+            'file': ru_file.name,
+            'lang': 'ru',
+            'type': 'original',
+            'author': meta.get('author', ''),
+            'title': title_ru,
+            'original_title': original_title,
+            'translator': '',
+            'original_id': '',
+            'year': meta.get('year', ''),
+            'genre': meta.get('genre', ''),
+            'status': 'raw',
+        })
+    
+    # Английский перевод
+    if not _row_exists(en_file.name):
+        rows.append({
+            'file': en_file.name,
+            'lang': 'en',
+            'type': 'translation',
+            'author': meta.get('author', ''),
+            'title': title_en,
+            'original_title': original_title,
+            'translator': meta.get('translator', ''),
+            'original_id': '',
+            'year': meta.get('year', ''),
+            'genre': meta.get('genre', ''),
+            'status': 'raw',
+        })
+
+    if rows:
+        new_df = pd.concat([df, pd.DataFrame(rows)], ignore_index=True)
+        new_df.to_csv(CSV_PATH, index=False)
+        print(f"📝 Добавлено в CSV: {[r['file'] for r in rows]}")
+        print(f"   Оригинал: {title_ru}")
+        print(f"   Перевод: {title_en}")
+        if meta.get('author'):
+            print(f"   Автор: {meta['author']}")
+        if meta.get('translator'):
+            print(f"   Переводчик: {meta['translator']}")
+    else:
+        print("ℹ️  Файлы уже есть в metadata.csv")
+
+
+# ── 1. ЗАГРУЗКА КНИГ ИЗ CSV ─────────────────────────────────────────────────
 
 def original_exists(cursor, title, author, language):
     """Проверяет, есть ли уже такой оригинал в БД"""
@@ -40,11 +128,22 @@ def translation_exists(cursor, title, translator, language):
     return cursor.fetchone()
 
 
-def load_from_csv():
-    """Загружает ТОЛЬКО новые записи из CSV"""
+def load_from_csv(files=None):
+    """
+    Загружает книги из CSV.
+    - files=None → загружает всё из CSV
+    - files=['file1.txt', 'file2.txt'] → загружает только указанные файлы
+    """
     
     df = pd.read_csv(CSV_PATH)
     df = df.fillna('')
+    
+    # Если указаны конкретные файлы — фильтруем
+    if files:
+        df = df[df['file'].isin(files)]
+        if df.empty:
+            print(f"⚠️ Ни один из указанных файлов не найден в CSV")
+            return
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -62,6 +161,13 @@ def load_from_csv():
             stats['errors'] += 1
             continue
         
+        # Проверка по хэшу (защита от дубликатов)
+        file_hash_value = file_hash(file_path)
+        if hash_exists(cursor, file_hash_value):
+            print(f"⏭️ Файл уже загружен (по хэшу): {file_path.name}")
+            stats['original_skip' if row['type'] == 'original' else 'translation_skip'] += 1
+            continue
+        
         with open(file_path, 'r', encoding='utf-8') as f:
             content = f.read()
         
@@ -77,10 +183,10 @@ def load_from_csv():
                 continue
             
             cursor.execute("""
-                INSERT INTO texts (title, author, year, language, genre, content)
-                VALUES (?, ?, ?, ?, ?, ?)
+                INSERT INTO texts (title, author, year, language, genre, content, file_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
             """, (title, author, row['year'] if row['year'] else None, row['lang'], 
-                  row['genre'] if row['genre'] else None, content))
+                  row['genre'] if row['genre'] else None, content, file_hash_value))
             
             text_id = cursor.lastrowid
             print(f"✅ Новый оригинал: {title} (id={text_id})")
@@ -113,9 +219,10 @@ def load_from_csv():
                     stats['linked_by_title'] += 1
             
             cursor.execute("""
-                INSERT INTO translations (text_id, title, translator, year, language, content)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (original_id, title, translator, row['year'] if row['year'] else None, row['lang'], content))
+                INSERT INTO translations (text_id, title, translator, year, language, content, file_hash)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (original_id, title, translator, row['year'] if row['year'] else None, 
+                  row['lang'], content, file_hash_value))
             
             translation_id = cursor.lastrowid
             
@@ -136,9 +243,8 @@ def load_from_csv():
     print(f"   Из них связано по названию: {stats['linked_by_title']}")
     print(f"   Ошибок: {stats['errors']}")
 
-# ============================================================
-# 2. СВЯЗЫВАНИЕ ПЕРЕВОДОВ С ОРИГИНАЛАМИ
-# ============================================================
+
+# ── 2. СВЯЗЫВАНИЕ ПЕРЕВОДОВ С ОРИГИНАЛАМИ ─────────────────────────────────
 
 def link_translations():
     """
@@ -222,9 +328,7 @@ def link_translations():
         print("💡 Совет: Добавьте колонку 'original_title' в CSV для точного связывания")
 
 
-# ============================================================
-# 3. ПРОВЕРКА НЕСВЯЗАННЫХ ПЕРЕВОДОВ
-# ============================================================
+# ── 3. ПРОВЕРКА НЕСВЯЗАННЫХ ПЕРЕВОДОВ ─────────────────────────────────────
 
 def check_orphans():
     """Показывает переводы, которые ещё не связаны с оригиналами"""
@@ -249,31 +353,81 @@ def check_orphans():
             print(f"   ID={trans_id}, язык={lang}, title='{title}', translator='{translator}'")
         print("-" * 60)
         print("💡 Запустите 'python src/ingest.py --link' для автоматического связывания")
-        print("   Или добавьте original_id в CSV и загрузите заново")
     
     conn.close()
 
 
-# ============================================================
-# 4. ТОЧКА ВХОДА
-# ============================================================
-
-# src/ingest.py (с argparse)
-
-import argparse
+# ── 4. ТОЧКА ВХОДА ────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--link', action='store_true', help='Связать переводы')
-    parser.add_argument('--check', action='store_true', help='Проверить несвязанные')
+    parser = argparse.ArgumentParser(description="Загрузка книг из CSV в базу данных")
+    
+    # Режимы
+    parser.add_argument('--link', action='store_true', help='Связать все переводы')
+    parser.add_argument('--check', action='store_true', help='Проверить несвязанные переводы')
+    parser.add_argument('--files', nargs='+', help='Загрузить только указанные файлы из CSV')
+    parser.add_argument('--add', action='store_true', help='Добавить пару книг (требует --ru и --en)')
+    
+    # Параметры для --add
+    parser.add_argument('--ru', help='Путь к русскому файлу (для --add)')
+    parser.add_argument('--en', help='Путь к английскому файлу (для --add)')
+    parser.add_argument('--meta', nargs='*', default=[], 
+                        help='Метаданные: author="Толстой" title_ru="Война и мир" title_en="War and Peace" translator="Мод" year="1869" genre="prose"')
+    
     args = parser.parse_args()
     
-    if args.link:
+    # Режим --add
+    if args.add:
+        if not args.ru or not args.en:
+            print("❌ Для --add нужны параметры --ru и --en")
+            print("   Пример: python src/ingest.py --add --ru tolstoy_ru.txt --en tolstoy_en.txt --meta author=Толстой title_ru=\"Война и мир\" title_en=\"War and Peace\"")
+            sys.exit(1)
+        
+        ru_file = Path(args.ru)
+        en_file = Path(args.en)
+        
+        # Если пути относительные — ищем в DATA_DIR
+        if not ru_file.is_absolute() and not ru_file.exists():
+            ru_file = DATA_DIR / ru_file
+        if not en_file.is_absolute() and not en_file.exists():
+            en_file = DATA_DIR / en_file
+        
+        # Проверяем существование файлов
+        if not ru_file.exists():
+            print(f"❌ Файл не найден: {ru_file}")
+            sys.exit(1)
+        if not en_file.exists():
+            print(f"❌ Файл не найден: {en_file}")
+            sys.exit(1)
+        
+        # Разбираем --meta key=val
+        meta = {}
+        for item in args.meta:
+            if '=' in item:
+                k, v = item.split('=', 1)
+                meta[k.strip()] = v.strip()
+        
+        # Добавляем в CSV и загружаем
+        append_to_csv(ru_file, en_file, meta)
+        load_from_csv(files=[args.ru, args.en])
+        
+        print("\n💡 Дальнейшие шаги:")
+        print("   python src/ingest.py --link    # связать переводы")
+        print("   python run.py detect           # найти ольфакторные предложения")
+        print("   python run.py auto-align --all # выровнять")
+    
+    # Режим --link
+    elif args.link:
         link_translations()
+    
+    # Режим --check
     elif args.check:
         check_orphans()
+    
+    # Режим загрузки (по умолчанию)
     else:
-        load_from_csv()
+        load_from_csv(files=args.files)
+
 
 if __name__ == "__main__":
     main()
