@@ -8,7 +8,8 @@
   3. Показывает топ-K кандидатов по гибридному скору
   4. Пользователь может:
      - выбрать кандидата по номеру (1, 2, 3...)
-     - найти по ключевому слову (f)
+     - выбрать НЕСКОЛЬКО кандидатов через запятую или пробел (1,3,5 или 1 3 5)
+     - найти по ключевому слову (f) — после поиска ввод интерпретируется как pos
      - добавить слово в словарь (a)
      - пропустить (s)
      - выйти (q)
@@ -68,7 +69,7 @@ def _get_translator():
 def _get_model():
     global _model
     if _model is None:
-        _model = get_model()  # из auto_align
+        _model = get_model()
     return _model
 
 def _get_morph():
@@ -138,7 +139,6 @@ def build_indexes(raw_sentences: List[Dict]):
             lem = lemmatize(w)
             lemma_index[lem].append(pos)
 
-    # убираем дубли позиций
     for d in (lemma_index, form_index):
         for k in d:
             d[k] = sorted(set(d[k]))
@@ -215,79 +215,98 @@ def add_olfactory_word(word: str, lang: str = 'ru') -> None:
     _added_words.append(lem)
     print(f"  ✅ «{lem}» добавлено в OLFACTORY_WORDS['{lang}']")
 
-# ── Сохранение пары ──────────────────────────────────────────────────────────
+# ── Сохранение пары (или нескольких пар) ────────────────────────────────────
 
-def save_pair(
+def save_pairs(
     cursor,
     ru_text_id: int,
     en_sentence_id: int,
-    position: int,
-    sentence: str,
-    do_parse: bool,
+    positions: List[int],
+    pos_to_sentence: Dict[int, str],
     stats: Dict,
     en_text: str = "",
-    sim: float = None,
+    sims: Dict[int, float] = None
 ):
-    # Найти или создать sentence_id
-    row = cursor.execute(
-        "SELECT sentence_id FROM sentences WHERE text_id=? AND sentence=? AND source_type='original'",
-        (ru_text_id, sentence)
-    ).fetchone()
+    """Сохраняет одну или несколько пар (EN → RU)."""
+    if sims is None:
+        sims = {}
+    
+    for pos in positions:
+        sentence = pos_to_sentence.get(pos)
+        if not sentence:
+            print(f"  ⚠️  Позиция {pos} не найдена в тексте")
+            continue
+        
+        row = cursor.execute(
+            "SELECT sentence_id FROM sentences WHERE text_id=? AND sentence=? AND source_type='original'",
+            (ru_text_id, sentence)
+        ).fetchone()
 
-    if row:
-        ru_id = row[0]
-    else:
-        # Извлекаем concept_phrase и gram_structure для новой записи
-        smell_words = OLFACTORY_WORDS.get('ru', set())
-        try:
-            concept = extract_concept_phrase_ru(sentence, smell_words)
-        except Exception:
-            concept = None
-        try:
-            gram_structure = parse_ru(concept or sentence)
-            gram_json = parse_to_json(gram_structure)
-        except Exception:
-            gram_structure, gram_json = None, None
+        if row:
+            ru_id = row[0]
+        else:
+            smell_words = OLFACTORY_WORDS.get('ru', set())
+            try:
+                concept = extract_concept_phrase_ru(sentence, smell_words)
+            except Exception:
+                concept = None
+            try:
+                gram_structure = parse_ru(concept or sentence)
+                gram_json = parse_to_json(gram_structure)
+            except Exception:
+                gram_structure, gram_json = None, None
 
-        # Найти search_word (первое совпавшее ольфакторное слово)
-        import pymorphy3
-        morph = pymorphy3.MorphAnalyzer()
-        search_word = None
-        for w in sentence.split():
-            clean = w.strip('.,!?;:—–()«»"\'').lower()
-            if morph.parse(clean)[0].normal_form in smell_words or clean in smell_words:
-                search_word = w.strip('.,!?;:—–()«»"\'')
-                break
+            import pymorphy3
+            morph = pymorphy3.MorphAnalyzer()
+            search_word = None
+            for w in sentence.split():
+                clean = w.strip('.,!?;:—–()«»"\'').lower()
+                if morph.parse(clean)[0].normal_form in smell_words or clean in smell_words:
+                    search_word = w.strip('.,!?;:—–()«»"\'')
+                    break
 
+            cursor.execute(
+                """INSERT INTO sentences
+                   (source_type, text_id, position, sentence, language,
+                    search_word, concept_phrase, gram_structure, gram_json)
+                   VALUES ('original', ?, ?, ?, 'ru', ?, ?, ?, ?)""",
+                (ru_text_id, pos, sentence, search_word, concept, gram_structure, gram_json)
+            )
+            ru_id = cursor.lastrowid
+
+        existing = cursor.execute(
+            "SELECT alignment_id FROM alignment WHERE sentence_ru_id=? AND sentence_en_id=?",
+            (ru_id, en_sentence_id)
+        ).fetchone()
+
+        if existing:
+            print(f"  ℹ️  Пара ru_id={ru_id} ↔ en_id={en_sentence_id} уже есть в БД.")
+            continue
+
+        sim = sims.get(pos, None)
         cursor.execute(
-            """INSERT INTO sentences
-               (source_type, text_id, position, sentence, language,
-                search_word, concept_phrase, gram_structure, gram_json)
-               VALUES ('original', ?, ?, ?, 'ru', ?, ?, ?, ?)""",
-            (ru_text_id, position, sentence, search_word, concept, gram_structure, gram_json)
+            """INSERT INTO alignment
+               (sentence_ru_id, sentence_en_id, cosine_sim, auto_aligned, assisted)
+               VALUES (?, ?, ?, 0, 1)""",
+            (ru_id, en_sentence_id, round(sim, 4) if sim is not None else None)
         )
-        ru_id = cursor.lastrowid
+        cursor.connection.commit()
+        stats["confirmed"] += 1
+        sim_str = f", sim={sim:.3f}" if sim is not None else ""
+        print(f"  ✅ Сохранено (ru_id={ru_id}, pos={pos}{sim_str})")
 
-    # Проверить дубль
-    existing = cursor.execute(
-        "SELECT alignment_id FROM alignment WHERE sentence_ru_id=? AND sentence_en_id=?",
-        (ru_id, en_sentence_id)
-    ).fetchone()
+# ── Парсинг ввода ──────────────────────────────────────────────────────────
 
-    if existing:
-        print("  ℹ️  Эта пара уже есть в БД.\n")
-        return
-
-    cursor.execute(
-        """INSERT INTO alignment
-           (sentence_ru_id, sentence_en_id, cosine_sim, auto_aligned, assisted)
-           VALUES (?, ?, ?, 0, 1)""",
-        (ru_id, en_sentence_id, round(sim, 4) if sim is not None else None)
-    )
-    cursor.connection.commit()
-    stats["confirmed"] += 1
-    sim_str = f", sim={sim:.3f}" if sim is not None else ""
-    print(f"  ✅ Сохранено (ru_id={ru_id}, pos={position}{sim_str})\n")
+def parse_numbers(input_str: str) -> List[int]:
+    """Парсит строку с числами через запятую или пробел."""
+    if not input_str:
+        return []
+    result = []
+    for p in input_str.replace(',', ' ').split():
+        p = p.strip()
+        if p.isdigit():
+            result.append(int(p))
+    return result
 
 # ── Поиск по ключевому слову ────────────────────────────────────────────────
 
@@ -317,7 +336,7 @@ def find_by_keyword(
     for p, mw in candidates:
         print_candidate_with_context(p, mw, pos_to_sentence, all_positions, prefix="  🔍")
     
-    return candidates
+    return [p for p, _ in candidates]
 
 # ── Основная функция ──────────────────────────────────────────────────────────
 
@@ -326,12 +345,11 @@ def review_unmatched(
     translation_id: int, 
     top_k: int = 5,
     do_parse: bool = False,
-    hybrid_weight: float = 0.5  # вес для cosine_sim (1 - hybrid_weight для word_overlap)
+    hybrid_weight: float = 0.5
 ):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Добавить колонку assisted если нет
     try:
         cursor.execute("ALTER TABLE alignment ADD COLUMN assisted INTEGER DEFAULT 0")
         conn.commit()
@@ -343,9 +361,7 @@ def review_unmatched(
         SELECT s.sentence_id, s.position, s.sentence
         FROM sentences s
         WHERE s.translation_id = ? AND s.source_type = 'translation'
-          AND s.sentence_id NOT IN (
-              SELECT sentence_en_id FROM alignment
-          )
+          AND s.sentence_id NOT IN (SELECT sentence_en_id FROM alignment)
         ORDER BY s.position
     """, (translation_id,)).fetchall()
 
@@ -395,13 +411,8 @@ def review_unmatched(
     print("\n🔢 Кодирую предложения через LaBSE...")
     model = _get_model()
     
-    # Кодируем все RU предложения (из sentences)
     ru_vecs = model.encode(df_ru["sentence"].tolist(), show_progress_bar=True, convert_to_numpy=True)
-    
-    # Кодируем переводы EN
     tr_vecs = model.encode(translations, show_progress_bar=True, convert_to_numpy=True)
-    
-    # Матрица сходства (n_ru × n_en)
     sim_matrix = _cosine_matrix(ru_vecs, tr_vecs)
 
     # ── 6. Подготовка к интерактивной сессии ──────────────────────────────
@@ -409,23 +420,25 @@ def review_unmatched(
 
     print(f"\n{'═'*70}")
     print(f"📝 РУЧНАЯ РАЗМЕТКА — {len(en_rows)} предложений")
-    print(f"   Управление: 1-{top_k} — выбрать кандидата | f — поиск по слову")
-    print(f"   a — добавить слово в словарь | s — пропустить | q — выйти")
+    print(f"   Управление:")
+    print(f"   1-{top_k} — выбрать кандидата по номеру")
+    print(f"   1,3,5 или 1 3 5 — выбрать НЕСКОЛЬКО кандидатов")
+    print(f"   f — поиск по ключевому слову (после поиска вводите POS)")
+    print(f"   a — добавить слово в словарь")
+    print(f"   s — пропустить | q — выйти")
     print(f"   Гибридный скор: {hybrid_weight*100:.0f}% LaBSE + {(1-hybrid_weight)*100:.0f}% лексика")
     print(f"{'═'*70}\n")
 
     # ── 7. Интерактивная разметка ───────────────────────────────────────────
     for idx, (en_id, en_pos, en_text) in enumerate(en_rows):
         translated = translations[idx]
-        col_sim_col = sim_matrix[:, idx]  # сходство с каждым RU предложением
+        col_sim_col = sim_matrix[:, idx]
 
-        # Вычисляем лексические скоры
         lex_scores = np.array([
             word_overlap(translated, df_ru.iloc[i]['sentence'])
             for i in range(len(df_ru))
         ])
 
-        # Гибридный скор
         hybrid = hybrid_weight * col_sim_col + (1 - hybrid_weight) * lex_scores
         top_indices = np.argsort(hybrid)[::-1][:top_k]
 
@@ -435,7 +448,6 @@ def review_unmatched(
         print(f"  → RU: \"{translated}\"")
         print()
 
-        # Показываем топ-K кандидатов
         candidates = []
         print(f"  🏆 Топ-{top_k} кандидатов (гибридный скор):")
         for rank, ru_i in enumerate(top_indices, 1):
@@ -448,24 +460,40 @@ def review_unmatched(
             print(f"       \"{ru_row['sentence'][:120]}\"")
         print()
 
-        # ── Интерактивный цикл для текущего EN ──────────────────────────────
         saved = False
         skipped = False
+        in_search_mode = False
         
         while not saved and not skipped:
-            choice = input(f"  Выбор (1-{top_k} / f=поиск / a=добавить слово / s=пропустить / q=выйти): ").strip().lower()
+            if not in_search_mode:
+                choice = input(f"  Выбор: ").strip().lower()
+            else:
+                # В режиме поиска — ждём ввод pos
+                choice = input(f"  Введите pos для сохранения (через запятую или пробел, Enter для выхода): ").strip()
+                if choice == '':
+                    in_search_mode = False
+                    print("  🔍 Выход из режима поиска\n")
+                    continue
 
             if choice == 'q':
-                print(f"\n✅ Прервано. Привязано: {stats['confirmed']}, пропущено: {stats['skipped']}, осталось: {len(en_rows)-idx-1}")
+                print(f"\n✅ Прервано. Привязано: {stats['confirmed']}, пропущено: {stats['skipped']}")
                 conn.close()
                 return
 
             if choice == 's':
+                if in_search_mode:
+                    in_search_mode = False
+                    print("  🔍 Выход из режима поиска\n")
+                    continue
                 stats["skipped"] += 1
                 skipped = True
                 break
 
             if choice == 'a':
+                if in_search_mode:
+                    in_search_mode = False
+                    print("  🔍 Выход из режима поиска\n")
+                    continue
                 word_to_add = input("  Слово для добавления в словарь: ").strip()
                 lang_choice = input("  Язык (ru/en, Enter=ru): ").strip().lower() or 'ru'
                 if word_to_add and lang_choice in ('ru', 'en'):
@@ -473,53 +501,77 @@ def review_unmatched(
                 continue
 
             if choice == 'f':
+                if in_search_mode:
+                    # Уже в режиме поиска — выходим
+                    in_search_mode = False
+                    print("  🔍 Выход из режима поиска\n")
+                    continue
+                
                 keyword = input("  Ключевое слово для поиска: ").strip()
                 if not keyword:
                     continue
                 
-                found = find_by_keyword(
+                found_positions = find_by_keyword(
                     keyword, pos_to_sentence, all_positions, 
                     lemma_index, form_index
                 )
                 
-                if found:
-                    # Позволяем выбрать позицию из найденных
-                    while True:
-                        pos_choice = input("  Введите pos для сохранения (или Enter чтобы продолжить): ").strip()
-                        if not pos_choice:
-                            break
-                        if pos_choice.isdigit():
-                            pos = int(pos_choice)
-                            if pos in pos_to_sentence:
-                                sentence = pos_to_sentence[pos]
-                                # Находим sim для этого предложения
-                                ru_row = df_ru[df_ru['position'] == pos]
-                                sim = float(ru_row['cosine_sim'].iloc[0]) if not ru_row.empty else None
-                                save_pair(
-                                    cursor, ru_text_id, en_id, pos, sentence, 
-                                    do_parse, stats, en_text, sim
-                                )
-                                saved = True
-                                break
-                            else:
-                                print(f"  ❌ Позиция {pos} не найдена.")
-                        else:
-                            print("  ❌ Введите число или Enter.")
+                if found_positions:
+                    in_search_mode = True
+                    print(f"  📝 Введите pos для сохранения (из найденных выше):")
                 continue
 
-            # Выбор кандидата по номеру
-            if choice.isdigit() and 1 <= int(choice) <= len(candidates):
-                idx_choice = int(choice) - 1
-                ru_row, sim, hybrid_score = candidates[idx_choice]
-                save_pair(
-                    cursor, ru_text_id, en_id, 
-                    int(ru_row['position']), ru_row['sentence'],
-                    do_parse, stats, en_text, sim
-                )
-                saved = True
-                break
+            # ── В режиме поиска: ввод интерпретируется как pos ──
+            if in_search_mode:
+                selected_positions = parse_numbers(choice)
+                if selected_positions:
+                    valid_positions = [p for p in selected_positions if p in pos_to_sentence]
+                    if valid_positions:
+                        sims = {}
+                        for pos in valid_positions:
+                            ru_row = df_ru[df_ru['position'] == pos]
+                            if not ru_row.empty:
+                                sims[pos] = float(hybrid[ru_row.index[0]])
+                            else:
+                                sims[pos] = None
+                        
+                        save_pairs(
+                            cursor, ru_text_id, en_id, valid_positions,
+                            pos_to_sentence, stats, en_text, sims
+                        )
+                        saved = True
+                        in_search_mode = False
+                        break
+                    else:
+                        print("  ❌ Ни одна из введённых позиций не найдена.")
+                else:
+                    print("  ❌ Введите числа через запятую или пробел (например: 821, 822 или 821 822)")
+                continue
 
-            print("  ❌ Неверный ввод.")
+            # ── В основном режиме: ввод интерпретируется как номера кандидатов ──
+            selected = parse_numbers(choice)
+            if selected:
+                valid_selected = [s for s in selected if 1 <= s <= len(candidates)]
+                if valid_selected:
+                    selected_positions = []
+                    sims = {}
+                    for s in valid_selected:
+                        idx_choice = s - 1
+                        ru_row, sim, hybrid_score = candidates[idx_choice]
+                        pos = int(ru_row['position'])
+                        selected_positions.append(pos)
+                        sims[pos] = sim
+                    
+                    save_pairs(
+                        cursor, ru_text_id, en_id, selected_positions,
+                        pos_to_sentence, stats, en_text, sims
+                    )
+                    saved = True
+                    break
+                else:
+                    print(f"  ❌ Введите числа от 1 до {len(candidates)}")
+            else:
+                print("  ❌ Неверный ввод. Введите числа через запятую или пробел (например: 1,3,5 или 1 3 5)")
 
         print('-' * 70)
 

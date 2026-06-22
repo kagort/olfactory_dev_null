@@ -21,7 +21,8 @@ CSV_PATH = PROJECT_ROOT / "data" / "metadata.csv"
 
 # результаты
 # Путь для сохранения
-ALIGNMENT_FILE = PROJECT_ROOT / "results" / "alignment.xlsx"
+ALIGNMENT_FILE = PROJECT_ROOT / "data" / "results" / "alignment.xlsx"
+FILENAME = PROJECT_ROOT / "data" /"results"/"Разметка.xlsx"
 
 
 # Словарь запахов

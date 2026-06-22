@@ -15,9 +15,9 @@
      Если cosine_sim >= threshold — пишем пару в таблицу alignment.
 
 Запуск:
-    python src/auto_align.py --ru 1 --en 1
-    python src/auto_align.py --ru 1 --en 1 --threshold 0.60 --no-window
-    python src/auto_align.py --all               # все пары текстов в БД
+    python src/align_auto.py --ru 1 --en 1
+    python src/align_auto.py --ru 1 --en 1 --threshold 0.60 --no-window
+    python src/align_auto.py --all               # все пары текстов в БД
 """
 
 import sys

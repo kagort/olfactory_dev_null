@@ -20,7 +20,6 @@ from config import DB_PATH, CSV_PATH, DATA_DIR
 
 
 # ── Утилиты ──────────────────────────────────────────────────────────────────
-
 def file_hash(path: Path) -> str:
     """Считает MD5 хэш файла"""
     return hashlib.md5(path.read_bytes()).hexdigest()
@@ -109,7 +108,6 @@ def append_to_csv(ru_file: Path, en_file: Path, meta: dict):
 
 
 # ── 1. ЗАГРУЗКА КНИГ ИЗ CSV ─────────────────────────────────────────────────
-
 def original_exists(cursor, title, author, language):
     """Проверяет, есть ли уже такой оригинал в БД"""
     cursor.execute("""
@@ -245,7 +243,6 @@ def load_from_csv(files=None):
 
 
 # ── 2. СВЯЗЫВАНИЕ ПЕРЕВОДОВ С ОРИГИНАЛАМИ ─────────────────────────────────
-
 def link_translations():
     """
     Связывает переводы с оригиналами по автору и названию.
@@ -329,7 +326,6 @@ def link_translations():
 
 
 # ── 3. ПРОВЕРКА НЕСВЯЗАННЫХ ПЕРЕВОДОВ ─────────────────────────────────────
-
 def check_orphans():
     """Показывает переводы, которые ещё не связаны с оригиналами"""
     
@@ -358,7 +354,6 @@ def check_orphans():
 
 
 # ── 4. ТОЧКА ВХОДА ────────────────────────────────────────────────────────────
-
 def main():
     parser = argparse.ArgumentParser(description="Загрузка книг из CSV в базу данных")
     
